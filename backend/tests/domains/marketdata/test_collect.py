@@ -161,3 +161,37 @@ def test_bad_master_does_not_mass_delist(session):
     with pytest.raises(BrokerUnavailable):
         s.collect_daily(date(2025, 5, 30))
     assert all(i.delisted_on is None for i in session.scalars(select(Instrument)))
+
+
+def test_intraday_bar_is_settled_not_treated_as_a_split(session):
+    """장중에 받아 둔 오늘 봉과 확정 종가가 다른 것은 수정주가가 아니다.
+
+    판을 올리면 3,500종목의 이력을 통째로 다시 받는다(2026-09-22에 실제로 그렇게 됐다).
+    """
+    b = base_broker()
+    m = svc(session, b, FakeFilings())
+    m.collect_daily(date(2025, 5, 30))
+    before = session.scalar(select(func.count()).select_from(DailyBar))
+
+    # 장 마감 뒤 확정 종가가 장중 값과 다르다
+    b.bars["000001"] = [bar("2025-05-30", 9999)]
+    res = m.collect_daily(date(2025, 5, 30))
+    rows = session.scalars(select(DailyBar).where(DailyBar.trade_date == "2025-05-30")).all()
+    assert res.series_bumped == [] and {r.series_no for r in rows} == {1}
+    assert session.scalar(select(func.count()).select_from(DailyBar)) == before  # 행이 늘지 않았다
+    inst = session.scalars(select(Instrument).where(Instrument.code == "000001")).one()
+    got = next(r for r in rows if r.instrument_id == inst.id)
+    assert got.close == 9999  # 잠정값을 확정값으로 고쳤다
+
+
+def test_a_real_adjustment_still_bumps(session):
+    """끝난 날의 값이 바뀐 것은 진짜 수정주가다. 그때는 판을 올려 다시 받는다."""
+    b = base_broker()
+    m = svc(session, b, FakeFilings())
+    m.collect_daily(date(2025, 5, 30))
+    # 다음 거래일. 지난 날들의 값이 절반으로 바뀌었다(액면분할)
+    b.days.append(CalendarDay("2025-06-02", True))
+    b.bars["000001"] = [bar("2025-05-29", 500), bar("2025-05-30", 501), bar("2025-06-02", 502)]
+    res = m.collect_daily(date(2025, 6, 2))
+    assert "000001" in res.series_bumped
+    assert 2 in {r.series_no for r in session.scalars(select(DailyBar)).all()}
