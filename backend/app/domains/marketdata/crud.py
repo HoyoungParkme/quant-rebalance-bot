@@ -142,10 +142,12 @@ class MarketDataCrud:
         )
         return self.s.scalar(stmt)
 
-    def existing_bar_dates(self, instrument_id: int, series_no: int) -> set[str]:
+    def existing_bar_dates(self, instrument_id: int, series_no: int, frm: str | None = None) -> set[str]:
         stmt = select(DailyBar.trade_date).where(
             DailyBar.instrument_id == instrument_id, DailyBar.series_no == series_no
         )
+        if frm:  # 받은 구간만 본다. 종목마다 1,900개 날짜를 다 읽으면 저녁 수집이 몇 배 느려진다
+            stmt = stmt.where(DailyBar.trade_date >= frm)
         return set(self.s.scalars(stmt))
 
     def add_bars(self, bars: list[DailyBar]) -> None:

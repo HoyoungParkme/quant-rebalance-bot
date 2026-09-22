@@ -132,7 +132,7 @@ class Collector:
                 series += 1
                 bumped = True
                 bars = self.broker.daily_bars(inst.code, "2019-01-01", to)  # 새 판으로 전체 다시
-        have = self.crud.existing_bar_dates(inst.id, series)
+        have = self.crud.existing_bar_dates(inst.id, series, frm=min(b.date for b in bars))
         rows = [self._to_row(inst.id, b, series, now_iso) for b in bars if b.date not in have]
         self.crud.add_bars(rows)
         self._settle_today(inst, bars, to, series, have, now_iso)
