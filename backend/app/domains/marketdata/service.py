@@ -70,6 +70,7 @@ class MarketDataService:
         try:
             res.instruments_added, res.status_changes = col.sync_instruments(day)
             self.crud.s.commit()
+            done = 0
             for inst in self.crud.instruments():
                 if inst.delisted_on is not None:
                     continue
@@ -84,9 +85,11 @@ class MarketDataService:
                 res.bars_ok += n
                 if bumped:
                     res.series_bumped.append(inst.code)
-                # 종목마다 끊는다. 3,500종목을 한 트랜잭션으로 잡으면 그 몇 분 동안
-                # 적재도 메신저 명령도 전부 DB 잠금에 막힌다
-                self.crud.s.commit()
+                # 50종목마다 끊는다. 한 트랜잭션으로 잡으면 그 몇 분 동안 적재도 메신저 명령도
+                # 막히고, 한 종목마다 끊으면 잠금을 3,500번 주고받느라 오히려 느리다
+                done += 1
+                if done % 50 == 0:
+                    self.crud.s.commit()
             col.collect_index((d - timedelta(days=30)).isoformat(), day)
             self.crud.s.commit()
             # 공시는 전자공시 반영이 며칠 늦을 수 있어 2주를 다시 훑는다. 이미 넣은 것은 건너뛴다
