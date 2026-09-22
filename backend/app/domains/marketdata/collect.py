@@ -159,7 +159,9 @@ class Collector:
         for fi in self.filings.list_filings(frm, to):
             inst = by_code.get(fi.stock_code)
             if inst is None or self.crud.filing_by_rcept(fi.rcept_no) is not None:
+                self.crud.s.commit()  # 건너뛸 때도 트랜잭션을 닫는다. 안 닫으면 창 하나 내내 잠금을 쥔다
                 continue
+            self.crud.s.commit()  # 외부 호출은 트랜잭션 밖에서. 전자공시 한 번에 0.5초씩 잠그면 봇이 못 들어온다
             rows = None
             if fi.reprt_code and fi.year:
                 rows = self.filings.financials(fi.corp_code, fi.year, fi.reprt_code)
