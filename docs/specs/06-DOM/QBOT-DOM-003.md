@@ -16,7 +16,7 @@ SQLite 파일 하나에 들어가는 테이블과 컬럼, 키, 인덱스를 정�
 
 ## 1. 개념 식별
 
-[[QBOT-DOM-001]]의 개념 20개가 테이블 20개다. 추가 테이블은 없다. StrategyConfig의 지표 목록은 JSON 컬럼으로 두고 별도 테이블로 풀지 않는다. 지표 7개가 행으로 필요한 조회가 없기 때문이다.
+[[QBOT-DOM-001]]의 개념 20개가 테이블 20개다. 추가 테이블은 `reconciliation_diff` 하나다. StrategyConfig의 지표 목록은 JSON 컬럼으로 두고 별도 테이블로 풀지 않는다. 지표 7개가 행으로 필요한 조회가 없기 때문이다.
 
 ## 2. 개념 모델
 
@@ -28,8 +28,8 @@ erDiagram
   filing ||--o{ financial_snapshot : ""
   strategy_config ||--o{ decision : ""
   decision ||--o{ score : ""
-  decision ||--o{ "order" : ""
-  "order" ||--o{ fill : ""
+  decision ||--o{ trade_order : ""
+  trade_order ||--o{ fill : ""
   instrument ||--o| position : ""
   reconciliation ||--o{ reconciliation_diff : ""
   gate_record ||--o| bot_state : ""
@@ -38,7 +38,7 @@ erDiagram
 
 `reconciliation_diff`는 Reconciliation의 "종목별 차이" 속성을 행으로 푼 것이다. 개념은 하나지만 테이블은 둘이다.
 
-## 3. 개념별 정리
+## 3. DD (테이블별 데이터 사전)
 
 ### 3.1 시장 데이터
 
@@ -65,8 +65,6 @@ erDiagram
 | starts_on | TEXT | NOT NULL | |
 | ends_on | TEXT | | NULL이면 진행 중 |
 
-인덱스: (instrument_id, starts_on, ends_on). "그날 지정돼 있었는가"를 한 번에 찾는다.
-
 #### daily_bar 일봉
 
 | 컬럼 | 형 | 제약 | 뜻 |
@@ -80,7 +78,7 @@ erDiagram
 | traded | INTEGER | NOT NULL | 0/1. 거래 여부 |
 | collected_at | TEXT | NOT NULL | |
 
-제약: UNIQUE (instrument_id, series_no, trade_date). 인덱스: (trade_date). 판 번호가 올라가도 옛 행은 지우지 않는다([[QBOT-INFRA-001#C10]]).
+판 번호가 올라가도 옛 행은 지우지 않는다([[QBOT-INFRA-001#C10]]).
 
 #### filing 공시
 
@@ -94,8 +92,6 @@ erDiagram
 | title | TEXT | NOT NULL | 키워드 규칙용 |
 | collected_at | TEXT | NOT NULL | |
 
-인덱스: (instrument_id, rcept_date). 시점 고정 조회의 핵심 인덱스([[QBOT-PRD-001#R3]]).
-
 #### financial_snapshot 재무 수치
 
 | 컬럼 | 형 | 제약 | 뜻 |
@@ -108,8 +104,6 @@ erDiagram
 | revenue, operating_income, net_income, net_income_owner | INTEGER | | |
 | equity, equity_owner | INTEGER | | |
 | eps | INTEGER | | |
-
-제약: UNIQUE (filing_id, period_end, period_kind, consolidated). 인덱스: (instrument_id, period_end).
 
 #### trading_calendar 거래일
 
@@ -127,8 +121,6 @@ erDiagram
 | index_name | TEXT | NOT NULL | KOSPI, KOSPI200 |
 | date | TEXT | NOT NULL | |
 | close | REAL | NOT NULL | |
-
-제약: UNIQUE (index_name, date).
 
 ### 3.2 판단
 
@@ -158,8 +150,6 @@ erDiagram
 | status | TEXT | NOT NULL | pending, running, partial, done, replay |
 | budget_per_slot | INTEGER | | 판단 시 종목당 예산 |
 
-제약: UNIQUE (asof, mode, status) WHERE status != 'replay'. 같은 날의 실제 판단은 하나다.
-
 #### score 종목 점수
 
 | 컬럼 | 형 | 제약 | 뜻 |
@@ -173,7 +163,7 @@ erDiagram
 | selected | INTEGER | NOT NULL | |
 | skip_reason | TEXT | | price, status, halted |
 
-제약: UNIQUE (decision_id, instrument_id). 상위 60개만 저장한다.
+상위 60개만 저장한다.
 
 #### rule_review 규칙 재점검
 
@@ -189,9 +179,9 @@ erDiagram
 
 ### 3.3 매매
 
-#### order 주문
+#### trade_order 주문
 
-SQLite 예약어라 실제 테이블 이름은 `trade_order`다.
+개념 Order. `order`가 SQLite 예약어라 테이블 이름은 `trade_order`다.
 
 | 컬럼 | 형 | 제약 | 뜻 |
 |---|---|---|---|
@@ -208,8 +198,6 @@ SQLite 예약어라 실제 테이블 이름은 `trade_order`다.
 | reject_reason | TEXT | | |
 | sent_at, closed_at | TEXT | | |
 
-UNIQUE(idem_key)가 멱등성을 DB에서 보장한다([[QBOT-UC-001#UC-S3]]). 인덱스: (status), (decision_id).
-
 #### fill 체결
 
 | 컬럼 | 형 | 제약 | 뜻 |
@@ -221,8 +209,6 @@ UNIQUE(idem_key)가 멱등성을 DB에서 보장한다([[QBOT-UC-001#UC-S3]]). �
 | tax | INTEGER | NOT NULL | |
 | filled_at | TEXT | NOT NULL | |
 | broker_fill_no | TEXT | | |
-
-제약: UNIQUE (order_id, broker_fill_no).
 
 #### position 보유
 
@@ -321,8 +307,6 @@ UNIQUE(idem_key)가 멱등성을 DB에서 보장한다([[QBOT-UC-001#UC-S3]]). �
 | factor_effects_json | TEXT | NOT NULL | 지표별 12개월 효과 |
 | notes | TEXT | | 계산 못 한 항목과 이유 |
 
-제약: UNIQUE (year_month, mode).
-
 ### 3.6 운영
 
 #### alert 알림
@@ -348,13 +332,38 @@ UNIQUE(idem_key)가 멱등성을 DB에서 보장한다([[QBOT-UC-001#UC-S3]]). �
 | result | TEXT | | ok 또는 에러 코드 |
 | result_text | TEXT | | |
 
-## 4. 경계
+## 4. 인덱스
 
-- 도메인 폴더의 `models.py`가 자기 테이블만 정의한다. 다른 도메인의 테이블을 외래 키로 가리키는 것은 허용하되(예: decision → strategy_config, order → decision), 그 테이블에 쓰는 것은 그 도메인의 서비스만 한다
+| 테이블 | 인덱스·제약 | 왜 |
+|---|---|---|
+| instrument | UNIQUE(code) | 코드로 찾는다 |
+| instrument_status | (instrument_id, starts_on, ends_on) | "그날 지정돼 있었는가"를 한 번에 |
+| daily_bar | UNIQUE(instrument_id, series_no, trade_date) | 같은 판의 같은 날은 하나 |
+| daily_bar | (trade_date) | 전 종목 하루치 조회 |
+| filing | UNIQUE(rcept_no) | 공시 번호 |
+| filing | (instrument_id, rcept_date) | 시점 고정 조회의 핵심 ([[QBOT-PRD-001#R3]]) |
+| financial_snapshot | UNIQUE(filing_id, period_end, period_kind, consolidated) | 같은 공시의 같은 기간은 하나 |
+| financial_snapshot | (instrument_id, period_end) | 결산 기간별 최신 스냅샷 |
+| trading_calendar | UNIQUE(date) | |
+| index_level | UNIQUE(index_name, date) | |
+| decision | UNIQUE(asof, mode) WHERE status != 'replay' | 같은 날의 실제 판단은 하나. 재현은 여럿 가능 |
+| decision | (status) | 대기·실행 중 판단 찾기 |
+| score | UNIQUE(decision_id, instrument_id) | |
+| trade_order | UNIQUE(idem_key) | 멱등성을 DB가 보장 ([[QBOT-UC-001#UC-S3]]) |
+| trade_order | (status), (decision_id) | 미확정 주문, 판단별 주문 |
+| fill | UNIQUE(order_id, broker_fill_no) | 같은 체결을 두 번 세지 않음 |
+| position | UNIQUE(instrument_id) | |
+| valuation | UNIQUE(date) | |
+| monthly_report | UNIQUE(year_month, mode) | |
+| command | (received_at) | 최근 명령 |
+
+## 5. 경계
+
+- 도메인 폴더의 `models.py`가 자기 테이블만 정의한다. 다른 도메인의 테이블을 외래 키로 가리키는 것은 허용하되(예: decision → strategy_config, trade_order → decision), 그 테이블에 쓰는 것은 그 도메인의 서비스만 한다
 - `bot_state`는 risk 도메인 소유다. OrderGate가 읽고, RiskService만 쓴다
 - 지우는 테이블은 `position`(수량 0)뿐이다. 나머지는 추가만 한다
 
-## 5. 미결사항
+## 6. 미결사항
 
 - [ ] SQLite의 부분 UNIQUE(WHERE 조건)를 Alembic으로 만들 때 방언 차이. 안 되면 `status`를 뺀 UNIQUE(asof, mode)와 replay 전용 테이블로 나눈다
 - [ ] `score`를 60개만 저장하는 대신 전 종목을 저장할지. 제안은 60개. 월 1,400행이 쌓이는 것은 문제없지만 필요한 조회가 없다
