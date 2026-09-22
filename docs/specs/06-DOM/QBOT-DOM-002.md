@@ -53,9 +53,9 @@ backend/
 - `scoring.py`는 순수 함수 모음이다. DB도 시계도 모른다. 검증 코드의 선정 로직을 여기로 옮기고, 검증 스크립트와 같은 테스트 데이터로 결과가 같은지 확인한다([[QBOT-PRD-001#N2]])
 - `ports.py`는 외부 호출이 실제로 있는 세 도메인에만 있다. `infra/`의 클라이언트가 어댑터에서 쓰인다
 
-## 2. 개념 식별
+## 2. 엔티티
 
-도메인 모델의 개념 20개는 각 도메인의 `models.py`에 ORM 클래스로 1:1 대응한다. 여기서는 그 외에 코드에만 있는 클래스를 식별한다.
+도메인 모델의 개념 20개는 각 도메인의 `models.py`에 ORM 클래스로 1:1 대응한다. 이름은 [[QBOT-DOM-001]]의 개념 영문명 그대로다. 여기서는 그 외에 코드에만 있는 클래스를 식별한다.
 
 | 클래스 | 자리 | 왜 필요한가 |
 |---|---|---|
@@ -70,7 +70,7 @@ backend/
 | ReportingService | reporting | 월간 보고 |
 | OpsService, NotifierPort | ops | 알림, 명령 기록, 상태 조회, 설치 점검 |
 
-## 3. 개념 모델
+## 3. 의존 관계
 
 ```mermaid
 flowchart TB
@@ -99,7 +99,7 @@ flowchart TB
 
 RiskService와 TradingService는 서로 부른다. RiskService가 손실 한도 계산에 보유 평가액을 읽고, TradingService가 주문마다 OrderGate를 부른다. 순환을 피하려고 RiskService는 TradingService의 **읽기 함수만** 쓰고, 쓰기는 TradingService → RiskService 한 방향이다.
 
-## 4. 개념별 정리
+## 4. 설계 클래스
 
 ### 4.1 core
 
