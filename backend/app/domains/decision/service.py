@@ -285,14 +285,51 @@ class DecisionService:
         lines.append(f"  적용하려면 review_approve --review-id {row.id} --confirm")
         return "\n".join(lines)
 
+    def ideal_return(self, decision: Decision, upto: str | None = None, index_etf: str = "069500") -> float | None:
+        """그 판단대로 샀을 때의 장부상 수익률. 실제 계좌와의 차이가 곧 체결 오차다 (R8).
+
+        계좌는 종목 부분과 지수 부분으로 나뉘어 있으므로 둘을 비중대로 섞어야 한다.
+        종목 부분만 재면 "체결 오차"가 아니라 구성 차이를 재게 된다.
+        """
+        picks = self.crud.picks(decision.id)
+        cfg = self.crud.config(decision.strategy_config_id)
+        weight = cfg.index_weight if cfg else 0.0
+        ends = self.md.month_ends_until(date.fromisoformat(upto or date.today().isoformat()), 60)
+        later = [e for e in ends if e > decision.asof]
+        if not later:
+            return None
+        start, end = self.md.closes_on(decision.asof), self.md.closes_on(later[0])
+
+        def ret(code: str) -> float | None:
+            a, b = start.get(code), end.get(code)
+            return (b / a - 1) if a and b else None
+
+        stock = [r for r in (ret(c) for c in picks) if r is not None]
+        index = ret(index_etf)
+        if not stock and index is None:
+            return None
+        stock_ret = sum(stock) / len(stock) if stock else 0.0
+        if index is None:  # 지수 부분을 못 재면 종목 부분만으로는 비교가 안 된다
+            return None if weight > 0 else stock_ret
+        return (1 - weight) * stock_ret + weight * index
+
     def _replay_portfolio(self, real, cfg) -> Portfolio:
         """재현의 자금. 그날 실제 판단이 있으면 그때 쓴 예산을 되살리고, 없으면 고정값."""
         if real is not None and real.budget_per_slot:
             return _portfolio_from_budget(real.budget_per_slot, cfg)
         return self.replay_portfolio
 
-    def replay(self, asof: date, compare_to: str = "stored", portfolio: Portfolio | None = None) -> ReplayResult:
-        """QBOT-MS-001 DecisionService.replay. 주문·알림 없음. status=replay로 저장."""
+    def replay(
+        self,
+        asof: date,
+        compare_to: str = "stored",
+        portfolio: Portfolio | None = None,
+        store: bool = True,
+    ) -> ReplayResult:
+        """QBOT-MS-001 DecisionService.replay. 주문·알림 없음. status=replay로 저장.
+
+        `store=False`는 계산만 한다. 관문 점검이 월마다 부르므로 그때마다 재현 행이 쌓이면 안 된다.
+        """
         pit = PointInTime(asof)
         cfg = self.crud.config_effective(asof.isoformat())
         if cfg is None:
@@ -300,7 +337,7 @@ class DecisionService:
         real = self.crud.real_decision(asof.isoformat(), "paper") or self.crud.real_decision(asof.isoformat(), "live")
         pf = portfolio or self._replay_portfolio(real, cfg)
         sel, budget, cash_switch, index_rebalance = self._compute(pit, cfg, pf)
-        d = self._store(pit, "paper", cfg, sel, budget, cash_switch, index_rebalance, "replay")
+        d = self._store(pit, "paper", cfg, sel, budget, cash_switch, index_rebalance, "replay") if store else None
         got_rank = list(sel.top60.index)
         if compare_to == "stored":
             if real is None:

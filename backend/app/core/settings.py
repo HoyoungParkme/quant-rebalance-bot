@@ -107,6 +107,19 @@ class Settings(BaseSettings):
             0.9,
         )
 
+    def live_order_credentials(self) -> tuple[str, str, str, str, str, float]:
+        """모드와 상관없이 실전 접속 정보. 실전 전환 관문의 접속 시험만 쓴다."""
+        if not self.live_ready():
+            raise ValueError("실전 접속 정보(키·시크릿·계좌 8자리)가 없다")
+        return (
+            "https://openapi.koreainvestment.com:9443",
+            self.kis_live_app_key,
+            self.kis_live_app_secret,
+            self.kis_live_account,
+            self.kis_live_product,
+            15.0,
+        )
+
     def live_ready(self) -> bool:
         """실전 접속 정보가 모두 있는가. 관문(UC-H2)이 확인한다."""
         return all([self.kis_live_app_key, self.kis_live_app_secret, len(self.kis_live_account) == 8])

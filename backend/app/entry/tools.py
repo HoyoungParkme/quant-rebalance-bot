@@ -120,6 +120,17 @@ RESUME_SCHEMA = {
 TELEGRAM_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 RECONCILE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 RUN_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+GATE_CHECK_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+GATE_APPROVE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "capital_krw": {"type": "integer", "minimum": 1_000_000},
+        "first_month_ratio": {"type": "number", "minimum": 0.1, "maximum": 1.0},
+        "confirm": {"type": "boolean"},
+    },
+    "required": ["capital_krw", "confirm"],
+    "additionalProperties": False,
+}
 REVIEW_RUN_SCHEMA = {
     "type": "object",
     "properties": {

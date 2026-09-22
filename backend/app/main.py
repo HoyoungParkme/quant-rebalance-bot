@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core import models_registry  # noqa: F401 - 모든 ORM을 등록해야 도메인 간 외래 키가 풀린다
 from app.core.clock import Clock
 from app.core.db import make_engine, make_session_factory
+from app.core.errors import QbotError
 from app.core.settings import Settings, load_settings
 from app.domains.decision.crud import DecisionCrud
 from app.domains.decision.service import DecisionService, Portfolio, plan_of, seed_default_config
@@ -24,6 +25,7 @@ from app.domains.marketdata.service import MarketDataService, pit_of
 from app.domains.ops.adapters.telegram import TelegramAdapter
 from app.domains.ops.service import Masker, OpsService
 from app.domains.reporting.service import ReportingService
+from app.domains.risk.gate import LiveGate, probe_live, refuse_live_without_gate, seed_live_db
 from app.domains.risk.service import OrderGate, RiskService, ValuationRecorder
 from app.domains.trading.adapters.kis import KisOrderAdapter
 from app.domains.trading.service import INDEX_ETF_CODE, TradingService
@@ -33,6 +35,8 @@ from app.entry.tools import (
     BACKFILL_SCHEMA,
     DECIDE_SCHEMA,
     EXECUTE_SCHEMA,
+    GATE_APPROVE_SCHEMA,
+    GATE_CHECK_SCHEMA,
     HALT_SCHEMA,
     INSTALL_SCHEMA,
     POSITIONS_SCHEMA,
@@ -87,6 +91,7 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
     settings = settings or load_settings()
     if session is None:
         session = make_session_factory(make_engine(settings.db_path))()
+    refuse_live_without_gate(session, settings.mode)  # 설정만 실전으로 바꾼 봇은 여기서 멈춘다
     clock = Clock()
     base, key, secret, rate = settings.query_credentials()
     kis = KisClient(
@@ -159,6 +164,50 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         flow_fn=trading.crud.accepted_flow_on,
         notify=lambda kind, text: notify(kind, text),
         max_drawdown=settings.max_drawdown,
+    )
+
+    def replay_matches(asof: str) -> bool | None:
+        """검증 파일과 비교한다. 그 날짜가 파일에 없으면 그날 저장된 판단과 비교(재현 가능성)."""
+        try:
+            d = date.fromisoformat(asof)
+            r = decision.replay(d, "research_file", store=False)
+            if r.matched is None:
+                r = decision.replay(d, "stored", store=False)
+            return r.matched
+        except QbotError:
+            return None
+
+    def month_gap(d) -> float | None:
+        """그 달 실제 수익률과 장부상 수익률의 차이. 두 구간의 시작·끝을 같은 날로 맞춘다."""
+        ideal = decision.ideal_return(d, upto=clock.today().isoformat(), index_etf=INDEX_ETF_CODE)
+        if ideal is None:
+            return None
+        later = [e for e in md.month_ends_until(clock.today(), 60) if e > d.asof]
+        if not later:
+            return None
+        start = risk.crud.valuation_on_or_before(d.asof)  # 장부상 구간과 같은 날에서 시작한다
+        end = risk.crud.valuation_on_or_before(later[0])
+        if start is None or end is None or start.date >= end.date or not start.total:
+            return None
+        flow = sum(v.external_flow for v in risk.crud.valuations(start.date, end.date)[1:])
+        return (end.total / (start.total + flow) - 1) - ideal
+
+    def live_balance():
+        """실전 계좌 잔고. 관문의 접속 시험은 모의가 아니라 실전 키로 해야 뜻이 있다."""
+        lb, lk, ls, la, lp, lr = settings.live_order_credentials()
+        client = KisClient(lb, lk, ls, rate_per_sec=lr, token_cache=settings.cache_dir / "kis-token-live.json")
+        return KisOrderAdapter(client, la, lp, "live", clock).balance()
+
+    gate = LiveGate(
+        session,
+        clock,
+        settings.mode,
+        replay_matches=replay_matches,
+        month_gap=month_gap,
+        live_ready=settings.live_ready,
+        live_probe=lambda: probe_live(live_balance),
+        seed_live=lambda rec, cap, now: seed_live_db(settings.data_dir / "qbot-live.sqlite3", rec, cap, now),
+        notify=lambda kind, text: notify(kind, text),
     )
     reporting = ReportingService(
         session,
@@ -270,6 +319,24 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
             f" (고점 재설정: {st.peak_equity:,}원, 다음 평가 때 새로 잡힘)" if args.get("reset_peak") else ""
         )
 
+    def gate_check_handler(args: dict) -> str:
+        res = gate.check()
+        session.commit()
+        return res.describe()
+
+    def gate_approve_handler(args: dict) -> str:
+        st = gate.approve(
+            int(args["capital_krw"]),
+            float(args.get("first_month_ratio", 0.3)),
+            command_id=last_command.get("id"),
+        )
+        session.commit()
+        return (
+            f"관문 승인됨. 첫 달 매수 상한 {st.first_month_cap:,}원.\n"
+            f"아직 이 프로세스는 {settings.mode} 계좌로 주문한다. "
+            "환경 변수 QBOT_MODE=live 로 바꾸고 봇을 다시 시작해야 실전 계좌로 나간다"
+        )
+
     def review_run_handler(args: dict) -> str:
         asof = date.fromisoformat(args["asof"]) if args.get("asof") else clock.today()
         row = decision.review_rules(asof, int(args.get("months", 36)))
@@ -346,6 +413,9 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
     tools.add(ToolSpec("positions", POSITIONS_SCHEMA, positions_handler))
     tools.add(ToolSpec("decide", DECIDE_SCHEMA, decide_handler, cli_only=True))
     tools.add(ToolSpec("execute", EXECUTE_SCHEMA, execute_handler, needs_confirm=True, cli_only=True))
+    # 관문 점검은 월마다 재현을 돌려 몇 분 걸린다. 메신저에서 부르면 그동안 스케줄이 막힌다
+    tools.add(ToolSpec("gate_check", GATE_CHECK_SCHEMA, gate_check_handler, cli_only=True))
+    tools.add(ToolSpec("gate_approve", GATE_APPROVE_SCHEMA, gate_approve_handler, needs_confirm=True))
     tools.add(ToolSpec("review_run", REVIEW_RUN_SCHEMA, review_run_handler))
     tools.add(ToolSpec("review_approve", REVIEW_APPROVE_SCHEMA, review_approve_handler, needs_confirm=True))
     tools.add(ToolSpec("run", RUN_SCHEMA, run_handler, cli_only=True))

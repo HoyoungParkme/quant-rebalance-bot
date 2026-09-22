@@ -96,3 +96,55 @@ def test_empty_adoption_is_refused(session):
     session.commit()
     with pytest.raises(Precondition):
         svc.approve_review(row.id)
+
+
+def test_ideal_return_mixes_the_stock_and_index_sleeves(session):
+    """계좌는 종목 80% + 지수 20%다. 종목만 재면 체결 오차가 아니라 구성 차이를 재게 된다."""
+    from app.domains.decision.models import Decision, Score
+    from app.domains.marketdata.models import DailyBar, Instrument
+
+    svc, ends = make(session)
+    d = Decision(asof=ends[-2], mode="paper", strategy_config_id=1, code_version="t", status="done")
+    session.add(d)
+    session.flush()
+    inst = session.query(Instrument).filter_by(code="000001").one()
+    session.add(
+        Score(decision_id=d.id, instrument_id=inst.id, factors_json="{}", pct_json="{}", total=1, rank=1, selected=1)
+    )
+    etf = Instrument(code="069500", name="KODEX 200", market="KOSPI", kind="etf")
+    session.add(etf)
+    session.flush()
+    for day, px in ((ends[-2], 10_000), (ends[-1], 11_000)):  # 지수는 +10%
+        session.add(
+            DailyBar(
+                instrument_id=etf.id,
+                trade_date=day,
+                series_no=1,
+                open=px,
+                high=px,
+                low=px,
+                close=px,
+                volume=1,
+                amount=px,
+                traded=1,
+                collected_at=day + "T18:30:00",
+            )
+        )
+    session.commit()
+
+    start = svc.md.closes_on(ends[-2])["000001"]
+    end = svc.md.closes_on(ends[-1])["000001"]
+    stock = end / start - 1
+    got = svc.ideal_return(d, upto=ends[-1])
+    assert abs(got - (0.8 * stock + 0.2 * 0.10)) < 1e-9  # 설정의 지수 비중 20%
+
+
+def test_ideal_return_is_none_when_the_index_part_cannot_be_measured(session):
+    """지수 부분을 못 재면 비교하지 않는다. 종목만으로 비교하면 관문이 엉뚱한 값을 본다."""
+    from app.domains.decision.models import Decision
+
+    svc, ends = make(session)
+    d = Decision(asof=ends[-2], mode="paper", strategy_config_id=1, code_version="t", status="done")
+    session.add(d)
+    session.commit()
+    assert svc.ideal_return(d, upto=ends[-1]) is None

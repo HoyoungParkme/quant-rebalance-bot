@@ -32,6 +32,9 @@ class RiskCrud:
         self.s.flush()
         return v
 
+    def valuation_on_or_before(self, day: str) -> Valuation | None:
+        return self.s.scalars(select(Valuation).where(Valuation.date <= day).order_by(Valuation.date.desc())).first()
+
     def last_valuation_before(self, day: str) -> Valuation | None:
         return self.s.scalars(select(Valuation).where(Valuation.date < day).order_by(Valuation.date.desc())).first()
 
