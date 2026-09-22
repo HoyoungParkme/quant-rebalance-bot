@@ -31,11 +31,11 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 | 항목 | 내용 |
 |---|---|
 | 근거 | [[QBOT-SCN-001#S11]] · [[QBOT-UC-001#UC-S1]] |
-| 구현 함수 | [[QBOT-MS-001#MarketDataService.financials]] · [[QBOT-MS-001#MarketDataService.bars]] · MarketDataCrud |
+| 구현 함수 | [[QBOT-MS-001#MarketDataService.financials]] · [[QBOT-MS-001#MarketDataService.bars]] · MarketDataCrud · statuses_on |
 | API | — |
-| 테스트 | financials·bars의 테스트 관점 전부. 검증 자료의 재무 파일을 적재해 2025-05-30 기준 조회가 검증 스크립트의 입력과 같은지 |
+| 테스트 | financials·bars의 테스트 관점 전부. 검증 자료의 재무 파일 표본(5종목)을 접수일=avail로 적재해 2025-05-30 기준 조회가 검증 스크립트의 선택 로직과 같은지 |
 | 선행 | A |
-| 완료 | — |
+| 완료 | main `a6c7c74` (2026-09-22). 테스트 11개. 리뷰 반영: 500일 규칙을 연간뿐 아니라 분기에도 적용, 직전 값은 "정확히 1년 전 같은 결산기"만(빠지면 NaN → 성장률 제외), 일봉 거래대금 NULL을 0이 아닌 NaN으로, 윤년 2월 29일 처리. 작성 중 발견: 500일 규칙을 조회 단계에서 걸면 직전 연도 행까지 사라져 성장률이 계산 불가 → 최신 행 선택 뒤에 적용 |
 
 #### B2 점수와 선정
 
@@ -145,7 +145,7 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 ## 4. 미결사항
 
-되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개.
+되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일.
 
 - [ ] B2의 일치 테스트에 쓸 검증 입력 파일의 크기. 20개월치 패널이 약 100MB라 저장소에 넣기 어렵다. 제안은 월말 5개만 골라 넣고 나머지는 로컬에서 돌린다
 - [ ] C1에서 전 종목 일봉을 모의 계좌 한도(초당 1건)로 받으면 약 40분이 걸린다. 실전 키(초당 20건)로 수집하고 주문만 모의로 낼지. 제안은 실전 조회 키를 수집에 쓴다. 조회는 돈이 움직이지 않는다
