@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import threading
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -28,14 +29,34 @@ ITEMS = {
 
 @dataclass
 class DartClient:
+    """전자공시 호출. 초당 한도를 스스로 지킨다.
+
+    문서에 적힌 한도는 하루 2만 건뿐이지만, 빠르게 몰아 부르면 서버가 연결을 그냥 끊는다
+    ("Server disconnected" / connection reset). 2026-09-22 적재 중 실제로 차단당해
+    공시가 2023-04-03에서 멈췄다. 그래서 간격을 두고, 끊기면 길게 쉬었다 다시 본다.
+    """
+
     api_key: str
     corp_cache: Path | None = None
     timeout: float = 20.0
+    rate_per_sec: float = 2.0
+    retries: int = 5
     _http: httpx.Client = field(default_factory=lambda: httpx.Client(timeout=20.0), init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _last_call: float = field(default=0.0, init=False, repr=False)
+
+    def _throttle(self) -> None:
+        gap = 1.0 / self.rate_per_sec
+        with self._lock:
+            wait = self._last_call + gap - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
 
     def _get(self, path: str, **params) -> dict:
         last = None
-        for attempt in range(4):
+        for attempt in range(self.retries):
+            self._throttle()
             try:
                 r = self._http.get(f"{BASE}/{path}", params={"crtfc_key": self.api_key, **params})
                 if r.status_code >= 500:
@@ -43,7 +64,8 @@ class DartClient:
                 body = r.json()
             except (httpx.HTTPError, json.JSONDecodeError) as e:
                 last = e
-                time.sleep(1.5 * (attempt + 1))
+                # 끊긴 뒤 바로 다시 부르면 차단이 길어진다. 5·15·45·135초로 늘려 쉰다
+                time.sleep(5 * (3**attempt))
                 continue
             if body.get("status") == "020":  # 일일 한도 초과
                 raise BrokerUnavailable("전자공시 일일 호출 한도 초과")
