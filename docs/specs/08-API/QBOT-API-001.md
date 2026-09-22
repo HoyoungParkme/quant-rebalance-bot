@@ -177,7 +177,7 @@ upstream: [QBOT-UC-001, QBOT-DOM-001, QBOT-INFRA-001]
 {"name":"install","inputSchema":{"type":"object","properties":{"register_autostart":{"type":"boolean","default":false}},"additionalProperties":false}}
 ```
 
-## 4. 운영자 순서
+## 4. 에이전트 순서 (운영자가 도구를 부르는 순서)
 
 | 상황 | 순서 |
 |---|---|
