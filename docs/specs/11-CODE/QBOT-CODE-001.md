@@ -80,7 +80,7 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 | API | [[QBOT-API-001#status]] · [[QBOT-API-001#halt]] · [[QBOT-API-001#resume]] |
 | 테스트 | 허용되지 않은 보낸 사람의 명령이 기록만 되고 실행되지 않는다. 계좌번호가 가려진다. 전송 실패가 예외를 올리지 않는다 |
 | 선행 | A. 텔레그램 봇 토큰 필요 |
-| 완료 | — |
+| 완료 | main `76a588d` (2026-09-22). 테스트 76개 통과(전체), 실제 텔레그램 전송 확인. 구조: `infra/telegram_client.py`(sendMessage·getUpdates 롱폴링) → `ops/adapters/telegram.py`(NotifierPort 구현) → `ops/service.py`(Masker, OpsService) / `risk/service.py`(halt·resume) / `entry/telegram/poller.py`(`/도구 k=v` 구문, 6자리 확인 코드 5분). 명령 기록은 인가 실패도 남긴다. 알림은 `[모의]/[실전]` 접두어. 리뷰 6건 반영: **메시지에 `confirm=true`를 직접 넣으면 확인 코드를 건너뛰던 문제**(폴러가 confirm 인자를 버린다), 도구 실패·폴러 예외 뒤 `session.rollback`이 없어 한 번의 DB 오류로 `/halt`까지 죽던 문제, 글자 없는 메시지(스티커)가 오프셋을 안 넘겨 같은 메시지를 반복 수신, 밀린 알림을 무한정 재전송하던 것을 새 알림 뒤 최근 10건으로, `resume reset_peak`가 고점을 실제로 재설정하지 않으면서 답은 재설정이라 하던 문제(D2 전까지 고점 0으로 두고 답에 그대로 적음), `command.result_text` 미기록. 발견: 확인 코드는 `needs_confirm` 도구의 스키마 검증 **뒤**에 요구해야 잘못된 인자를 코드 입력 전에 알려줄 수 있다 |
 
 #### D1 주문 관문과 주문 하나 보내기
 
@@ -145,9 +145,9 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 ## 4. 미결사항
 
-되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일. [[QBOT-MS-001#Scorer.score]] 1~2단계: `OPG_Q`의 절단 범위는 [-1, 5]가 아니라 [-3, 5]이고 임계값은 `|op_q_prev| >= 1억`, `OPG`는 `op_annual_prev > 0`일 때만 (검증 quarterly.py·build_panel.py 기준). 같은 함수 3단계 뒤에 "이 제외를 백분위 계산 전에 한다"를 명시. [[QBOT-MS-001#DecisionService.decide_month_end]] 9단계: "최근 10개월 월말 종가 평균"은 "있는 만큼(최대 10개)의 평균보다 높지 않으면 현금"으로(검증 simulate.py 15행). [[QBOT-MS-001#Scorer.select]] 출력의 `top60`은 "상위 60 + 선정·건너뛴 행 전부"로. [[QBOT-PRD-001#R2]]의 "잠정실적"은 v1에서 수집하지 않는다(거래소 공시, 다음 버전). [[QBOT-MS-001#MarketDataService.collect_daily]] 4단계 "종목마다 daily_bars"와 6단계 "instrument_status"는 마스터 파일 1회 다운로드로 대체. [[QBOT-INFRA-001]] 5장 인증 표에 "휴장일 조회는 실전 키 필요"와 "조회는 실전 키, 주문은 모드에 따라" 추가. 결산월 12월을 가정해 결산기 종료일을 정한다(비12월 결산 법인은 어긋남).
+되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일. [[QBOT-MS-001#Scorer.score]] 1~2단계: `OPG_Q`의 절단 범위는 [-1, 5]가 아니라 [-3, 5]이고 임계값은 `|op_q_prev| >= 1억`, `OPG`는 `op_annual_prev > 0`일 때만 (검증 quarterly.py·build_panel.py 기준). 같은 함수 3단계 뒤에 "이 제외를 백분위 계산 전에 한다"를 명시. [[QBOT-MS-001#DecisionService.decide_month_end]] 9단계: "최근 10개월 월말 종가 평균"은 "있는 만큼(최대 10개)의 평균보다 높지 않으면 현금"으로(검증 simulate.py 15행). [[QBOT-MS-001#Scorer.select]] 출력의 `top60`은 "상위 60 + 선정·건너뛴 행 전부"로. [[QBOT-PRD-001#R2]]의 "잠정실적"은 v1에서 수집하지 않는다(거래소 공시, 다음 버전). [[QBOT-MS-001#MarketDataService.collect_daily]] 4단계 "종목마다 daily_bars"와 6단계 "instrument_status"는 마스터 파일 1회 다운로드로 대체. [[QBOT-INFRA-001]] 5장 인증 표에 "휴장일 조회는 실전 키 필요"와 "조회는 실전 키, 주문은 모드에 따라" 추가. 결산월 12월을 가정해 결산기 종료일을 정한다(비12월 결산 법인은 어긋남). [[QBOT-API-001#resume]]에 "메신저에서 온 `confirm` 인자는 무시하고 확인 코드로만 채운다"를 명시. [[QBOT-MS-001]] OpsService.notify: 밀린 알림은 새 알림 뒤에 최근 10건만.
 
-- [x] B2의 일치 테스트 입력 크기 → 월말 5개 표본(689KB)을 저장소에, 21개월 전체는 로컬 환경 변수 `QBOT_RESEARCH_PANEL`
+- [x] B2의 일치 테스트 입력 크기 → 월말 5개 표본(689KB)을 저장소에, 21개월 전체는 로컬 파일을 환경 변수 `QBOT_RESEARCH_PANEL`
 - [x] C1 조회 키 → 실전 키로 수집(초당 15건으로 제한), 주문은 모드에 따라. `Settings.query_credentials`
 - [ ] D1의 실제 주문 테스트를 모의 계좌 어느 종목으로 할지. 제안은 거래량 많은 대형주 1주
 - [ ] 2019~2022년 재무는 전자공시 API 호출량(2,500사 × 4보고서 × 4년 ≈ 4만 건)이 커서 v1 적재 범위(2023~)에서 뺐다. 연 1회 재점검(R13)에 필요해지면 금감원 일괄 파일로 채운다
