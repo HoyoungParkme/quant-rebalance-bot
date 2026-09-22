@@ -35,6 +35,12 @@ def test_schema_validation_and_confirm():
     assert log[-1][4] is None
 
 
+def test_result_text_is_recorded():
+    reg, log = make()
+    reg.run("replay", {"asof": "2025-05-30"}, "111", "telegram")
+    assert log[-1][5] == "ok 2025-05-30"
+
+
 def test_cli_only_and_unknown_tool():
     reg, _ = make()
     assert reg.run("install", {}, "111", "telegram").error == "precondition"

@@ -18,9 +18,24 @@ from app.domains.decision.service import DecisionService, Portfolio, seed_defaul
 from app.domains.marketdata.adapters.dart import DartAdapter
 from app.domains.marketdata.adapters.kis import KisAdapter
 from app.domains.marketdata.service import MarketDataService
-from app.entry.tools import BACKFILL_SCHEMA, INSTALL_SCHEMA, REPLAY_SCHEMA, ToolRegistry, ToolSpec
+from app.domains.ops.adapters.telegram import TelegramAdapter
+from app.domains.ops.service import Masker, OpsService
+from app.domains.risk.service import RiskService
+from app.entry.telegram.poller import TelegramPoller
+from app.entry.tools import (
+    BACKFILL_SCHEMA,
+    HALT_SCHEMA,
+    INSTALL_SCHEMA,
+    REPLAY_SCHEMA,
+    RESUME_SCHEMA,
+    STATUS_SCHEMA,
+    TELEGRAM_SCHEMA,
+    ToolRegistry,
+    ToolSpec,
+)
 from app.infra.dart_client import DartClient
 from app.infra.kis_client import KisClient
+from app.infra.telegram_client import TelegramClient
 
 
 def code_version() -> str:
@@ -43,7 +58,10 @@ class App:
     clock: Clock
     md: MarketDataService
     decision: DecisionService
+    ops: OpsService
+    risk: RiskService
     tools: ToolRegistry
+    poller: TelegramPoller
 
 
 def build(settings: Settings | None = None, session: Session | None = None) -> App:
@@ -67,8 +85,40 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         # 매매 도메인(슬라이스 D2)이 생기기 전까지는 계획 자금을 쓴다
         return Portfolio(total=settings.planned_capital, index_value=0)
 
-    decision = DecisionService(session, md, portfolio, code_version())
-    tools = ToolRegistry(allowed_senders={settings.telegram_chat_id})
+    masker = Masker(
+        [
+            settings.kis_paper_account,
+            settings.kis_live_account,
+            settings.kis_paper_app_key,
+            settings.kis_paper_app_secret,
+            settings.kis_live_app_key,
+            settings.kis_live_app_secret,
+            settings.dart_api_key,
+            settings.telegram_bot_token,
+        ]
+    )
+    risk = RiskService(session, clock, settings.mode)
+    notifier = TelegramAdapter(TelegramClient(settings.telegram_bot_token), settings.telegram_chat_id)
+    ops = OpsService(
+        session,
+        notifier,
+        clock,
+        settings.mode,
+        masker,
+        state_fn=lambda: {**risk.state_dict(), "pending_decisions": len(decision.crud.pending())},
+    )
+
+    def notify(kind: str, text: str) -> None:
+        ops.notify(kind, text)
+        session.commit()
+
+    decision = DecisionService(session, md, portfolio, code_version(), notifier=notify)
+
+    def record(sender, tool, args, allowed, error, text=None):
+        ops.record_command(sender, tool, args, allowed, error, result_text=text)
+        session.commit()
+
+    tools = ToolRegistry(allowed_senders={settings.telegram_chat_id}, record=record, on_error=session.rollback)
 
     def replay_handler(args: dict) -> str:
         r = decision.replay(date.fromisoformat(args["asof"]), args.get("compare_to", "stored"))
@@ -113,7 +163,34 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
             lines.append("자동 시작 등록: 슬라이스 E에서 지원")
         return "\n".join(lines)
 
+    def status_handler(args: dict) -> str:
+        return ops.status()
+
+    def halt_handler(args: dict) -> str:
+        _, cancelled = risk.halt(args.get("reason"))
+        session.commit()
+        ops.notify("error", f"정지됨. 사유: {args.get('reason') or '없음'}. 미체결 취소 {cancelled}건")
+        session.commit()
+        return f"정지됨. 미체결 취소 {cancelled}건. 수집과 기록은 계속한다"
+
+    def resume_handler(args: dict) -> str:
+        # 평가액은 매매 도메인(D2)이 준다. 그 전까지는 고점을 0으로 두어 다음 평가에서 새로 잡히게 한다
+        st = risk.resume(bool(args.get("reset_peak")), current_equity=0 if args.get("reset_peak") else None)
+        session.commit()
+        return "재개됨" + (
+            f" (고점 재설정: {st.peak_equity:,}원, 다음 평가 때 새로 잡힘)" if args.get("reset_peak") else ""
+        )
+
+    def telegram_handler(args: dict) -> str:
+        poller.run_forever()
+        return "종료"
+
+    tools.add(ToolSpec("status", STATUS_SCHEMA, status_handler))
+    tools.add(ToolSpec("halt", HALT_SCHEMA, halt_handler, needs_confirm=True))
+    tools.add(ToolSpec("resume", RESUME_SCHEMA, resume_handler, needs_confirm=True))
+    tools.add(ToolSpec("telegram", TELEGRAM_SCHEMA, telegram_handler, cli_only=True))
     tools.add(ToolSpec("replay", REPLAY_SCHEMA, replay_handler))
     tools.add(ToolSpec("backfill", BACKFILL_SCHEMA, backfill_handler, cli_only=True))
     tools.add(ToolSpec("install", INSTALL_SCHEMA, install_handler, cli_only=True))
-    return App(settings, session, clock, md, decision, tools)
+    poller = TelegramPoller(notifier, tools, clock, settings.telegram_chat_id, on_error=session.rollback)
+    return App(settings, session, clock, md, decision, ops, risk, tools, poller)

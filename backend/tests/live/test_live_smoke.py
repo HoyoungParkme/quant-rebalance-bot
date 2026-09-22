@@ -47,3 +47,7 @@ def test_dart_filings_and_financials(app):
     assert isinstance(fil, list)
     rows = app.md.filings.financials("00126380", "2025", "11013")  # 삼성전자 2025 1분기
     assert rows is not None and rows.values["operating_income"] > 0 and rows.cumulative["operating_income"] > 0
+
+
+def test_telegram_send(app):
+    assert app.ops.notifier.send("[모의] C2 연기 테스트: 알림 경로 확인") is True

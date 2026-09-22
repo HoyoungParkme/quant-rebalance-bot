@@ -28,7 +28,8 @@ class ToolResult:
 @dataclass
 class ToolRegistry:
     allowed_senders: set[str]
-    record: Callable[[str, str, dict, bool, str | None], None] | None = None
+    record: Callable[[str, str, dict, bool, str | None, str | None], None] | None = None
+    on_error: Callable[[], None] | None = None
     tools: dict[str, ToolSpec] = field(default_factory=dict)
 
     def add(self, spec: ToolSpec) -> None:
@@ -52,7 +53,8 @@ class ToolRegistry:
         if spec.cli_only and via != "cli":
             self._rec(sender, name, args, True, "precondition")
             return ToolResult(False, f"{name}은 명령줄에서만 쓸 수 있다", "precondition")
-        errs = self.validate(name, args)
+        # confirm은 확인 단계에서 채워지므로, 스키마 검증은 confirm이 있다고 보고 한다
+        errs = self.validate(name, {**args, "confirm": True} if spec.needs_confirm else args)
         if errs:
             self._rec(sender, name, args, True, "invalid_args")
             return ToolResult(False, "; ".join(errs), "invalid_args")
@@ -62,14 +64,18 @@ class ToolRegistry:
         try:
             text = spec.handler(args)
         except Exception as e:  # noqa: BLE001 - 도구 오류는 사람이 읽는 문장으로 돌려준다
-            self._rec(sender, name, args, True, type(e).__name__)
+            if self.on_error:
+                self.on_error()  # 실패한 핸들러의 부분 쓰기를 기록 커밋이 같이 저장하지 않도록 먼저 롤백
+            self._rec(sender, name, args, True, type(e).__name__, str(e))
             return ToolResult(False, str(e), type(e).__name__)
-        self._rec(sender, name, args, True, None)
+        self._rec(sender, name, args, True, None, text)
         return ToolResult(True, text)
 
-    def _rec(self, sender: str, name: str, args: dict, allowed: bool, error: str | None) -> None:
+    def _rec(
+        self, sender: str, name: str, args: dict, allowed: bool, error: str | None, text: str | None = None
+    ) -> None:
         if self.record:
-            self.record(sender, name, json.loads(json.dumps(args, default=str)), allowed, error)
+            self.record(sender, name, json.loads(json.dumps(args, default=str)), allowed, error, text)
 
 
 REPLAY_SCHEMA = {
@@ -97,3 +103,18 @@ INSTALL_SCHEMA = {
     "properties": {"register_autostart": {"type": "boolean", "default": False}},
     "additionalProperties": False,
 }
+
+STATUS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+HALT_SCHEMA = {
+    "type": "object",
+    "properties": {"reason": {"type": "string", "maxLength": 200}, "confirm": {"type": "boolean"}},
+    "required": ["confirm"],
+    "additionalProperties": False,
+}
+RESUME_SCHEMA = {
+    "type": "object",
+    "properties": {"reset_peak": {"type": "boolean"}, "confirm": {"type": "boolean"}},
+    "required": ["confirm"],
+    "additionalProperties": False,
+}
+TELEGRAM_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
