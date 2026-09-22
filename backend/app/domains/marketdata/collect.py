@@ -111,10 +111,6 @@ class Collector:
         return n
 
     # ----- 일봉 -----
-    def fetch_bars(self, inst: Instrument, frm: str, to: str) -> list[Bar]:
-        """조회만. 스레드에서 불러도 된다 (DB를 만지지 않는다)."""
-        return self.broker.daily_bars(inst.code, frm, to)
-
     def collect_bars(self, inst: Instrument, frm: str, to: str, now_iso: str) -> tuple[int, bool]:
         """frm~to 일봉을 받아 추가. 어제 종가가 저장값과 다르면 새 판으로 과거 전체를 다시 받는다.
 

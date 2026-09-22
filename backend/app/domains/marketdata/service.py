@@ -109,8 +109,13 @@ class MarketDataService:
             with ThreadPoolExecutor(max_workers=4) as pool:
                 for k in range(0, len(live), 40):
                     batch = live[k : k + 40]
-                    futs = {pool.submit(col.fetch_bars, i, frm.isoformat(), today.isoformat()): i for i in batch}
-                    for fut, inst in futs.items():
+                    # 스레드에는 ORM 객체가 아니라 문자열만 넘긴다. 이어받기: 이미 있는 종목은 마지막 저장일부터
+                    jobs = []
+                    for i in batch:
+                        last = self.crud.last_bar(i.id)
+                        f0 = max(frm.isoformat(), last.trade_date) if last else frm.isoformat()
+                        jobs.append((i, pool.submit(self.broker.daily_bars, i.code, f0, today.isoformat())))
+                    for inst, fut in jobs:
                         try:
                             n, _ = col.store_bars(inst, fut.result(), today.isoformat(), now_iso)
                             ok += n

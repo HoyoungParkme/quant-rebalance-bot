@@ -11,6 +11,6 @@ from app.core.models_registry import metadata
 def session():
     engine = create_engine("sqlite://", future=True)
     metadata.create_all(engine)
-    s = sessionmaker(bind=engine, future=True)()
+    s = sessionmaker(bind=engine, future=True, expire_on_commit=False)()  # 앱과 같은 설정
     yield s
     s.close()
