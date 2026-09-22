@@ -64,3 +64,20 @@ class MarketDataCrud:
             (InstrumentStatus.ends_on.is_(None)) | (InstrumentStatus.ends_on >= day),
         )
         return list(self.s.scalars(stmt))
+
+    def index_month_end_closes(self, index_name: str, until: str, n: int) -> list[float]:
+        """until 이하 월말 종가 n개(오름차순). 추세 필터용."""
+        from app.domains.marketdata.models import IndexLevel
+
+        stmt = (
+            select(IndexLevel.date, IndexLevel.close)
+            .where(IndexLevel.index_name == index_name, IndexLevel.date <= until)
+            .order_by(IndexLevel.date)
+        )
+        by_month: dict[str, float] = {}
+        for d, c in self.s.execute(stmt):
+            by_month[d[:7]] = c  # 같은 달의 마지막 날이 남는다
+        return list(by_month.values())[-n:]
+
+    def has_bars_on(self, day: str) -> bool:
+        return self.s.scalar(select(func.count()).select_from(DailyBar).where(DailyBar.trade_date == day)) > 0

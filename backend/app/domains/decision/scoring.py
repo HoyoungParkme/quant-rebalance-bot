@@ -116,7 +116,9 @@ def select(scored: pd.DataFrame, budget_per_slot: int, n: int, excluded: set[str
             skipped[code] = "price"
         else:
             picked.append(code)
-    top = scored.head(60).copy()
+    # 저장 대상: 상위 60 + 순회하며 선정·건너뛴 행 전부. 60위 밖에서 뽑힌 종목이 저장에서 빠지면 안 된다
+    keep = scored.index.isin(list(scored.index[:60]) + picked + list(skipped))
+    top = scored[keep].copy()
     top["selected"] = top.index.isin(picked)
-    top["skip_reason"] = pd.Series(skipped).reindex(top.index)
+    top["skip_reason"] = pd.Series(skipped, dtype="object").reindex(top.index)
     return Selection(picked=picked, skipped=skipped, top60=top)

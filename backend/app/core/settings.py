@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(min_length=1)
     telegram_chat_id: str = Field(min_length=1)
 
+    # 운용 자금 (QBOT-PRD-001 7장 계획값). 매매 도메인이 생기기 전 판단 예산과 재현에 쓴다
+    planned_capital: int = 3_000_000
+
     # 위험 한도 (QBOT-PRD-001 R9). 전략 설정이 아니라 운용 설정이라 환경 변수다
     max_drawdown: float = 0.30
     max_position_weight: float = 0.15

@@ -171,3 +171,15 @@ def test_empty_bars_raise_data_not_ready():
             pd.DataFrame(),
             pd.Series(dtype=float),
         )
+
+
+def test_select_keeps_picks_beyond_rank_60():
+    n = 80
+    scored = pd.DataFrame(
+        {"close": [1_000_000] * 70 + [10_000] * 10, "total": list(range(n, 0, -1))},
+        index=pd.Index([f"{i:06d}" for i in range(n)], name="code"),
+    )
+    sel = sc.select(scored, 50_000, 5, set())
+    assert sel.picked == [f"{i:06d}" for i in range(70, 75)]
+    assert set(sel.picked) <= set(sel.top60.index)  # 60위 밖 선정도 저장 대상에 있다
+    assert sel.top60.selected.sum() == 5 and len(sel.top60) == 75

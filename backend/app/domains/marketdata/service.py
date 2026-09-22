@@ -131,6 +131,16 @@ class MarketDataService:
             out.setdefault(codes[st.instrument_id], set()).add(st.status)
         return out
 
+    def index_month_ends(self, pit: PointInTime, index_name: str = "KOSPI", n: int = 10) -> list[float]:
+        """기준일 이하 월말 종가 n개. 하락장 현금 전환 규칙(QBOT-PRD-001 R5)이 쓴다."""
+        return self.crud.index_month_end_closes(index_name, pit.bars_until().isoformat(), n)
+
+    def has_bars_on(self, pit: PointInTime) -> bool:
+        return self.crud.has_bars_on(pit.asof.isoformat())
+
+    def shares(self) -> pd.Series:
+        return pd.Series({i.code: i.shares_outstanding for i in self.crud.instruments()}, dtype="float64")
+
 
 def pit_of(asof: date) -> PointInTime:
     return PointInTime(asof)
