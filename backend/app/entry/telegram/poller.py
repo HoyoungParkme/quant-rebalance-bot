@@ -9,6 +9,7 @@ import secrets
 import shlex
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
@@ -77,6 +78,7 @@ class TelegramPoller:
     registry: ToolRegistry
     clock: Clock
     allowed_chat: str
+    lock: object | None = None  # 스케줄과 같은 세션을 쓴다 (app.entry.schedule.jobs 참고)
     offset: int | None = None
     on_error: Callable[[], None] | None = None  # 예외 뒤 정리(세션 롤백)
     pending: dict[str, Pending] = field(default_factory=dict)
@@ -113,7 +115,8 @@ class TelegramPoller:
             if cmd.text is None:
                 continue
             try:
-                reply = self.handle(cmd.sender, cmd.text)
+                with self.lock or nullcontext():
+                    reply = self.handle(cmd.sender, cmd.text)
             except Exception as e:  # noqa: BLE001 - 한 명령의 실패가 다음 명령(비상 정지)을 막으면 안 된다
                 if self.on_error:
                     self.on_error()  # 세션 롤백

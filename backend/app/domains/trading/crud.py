@@ -149,3 +149,26 @@ class TradingCrud:
             amount = qty * price
             total += (amount - fee - tax) if side == "sell" else -(amount + fee)
         return total
+
+    def accepted_flow_on(self, day: str) -> int:
+        """그날 사람이 "이만큼은 입출금"이라고 밝힌 금액.
+
+        계좌와 기록의 차액 전부가 아니다. 차액에는 우리가 놓친 매매·수수료도 섞여 있고,
+        그것까지 기준선을 옮기면 그 손실이 손실 한도에서 사라진다.
+        """
+        rows = self.s.scalars(
+            select(Reconciliation).where(
+                Reconciliation.resolution == "accepted", Reconciliation.resolved_at.like(f"{day}%")
+            )
+        )
+        return sum(r.external_flow for r in rows)
+
+    def trade_stats(self, frm: str, to: str) -> tuple[int, int]:
+        """기간 중 체결 건수와 수수료·세금 합. 월간 보고가 쓴다."""
+        rows = self.s.execute(
+            select(func.count(Fill.id), func.coalesce(func.sum(Fill.fee + Fill.tax), 0)).where(
+                Fill.filled_at >= frm, Fill.filled_at <= to + "T23:59:59"
+            )
+        )
+        n, fees = rows.one()
+        return int(n), int(fees)

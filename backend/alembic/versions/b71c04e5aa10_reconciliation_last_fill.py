@@ -18,9 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "reconciliation", sa.Column("last_fill_id", sa.Integer(), nullable=False, server_default="0")
-    )
+    op.add_column("reconciliation", sa.Column("last_fill_id", sa.Integer(), nullable=False, server_default="0"))
 
 
 def downgrade() -> None:

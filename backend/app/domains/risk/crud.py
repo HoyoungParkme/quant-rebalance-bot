@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.domains.risk.models import BotState
+from app.domains.risk.models import BotState, Valuation
 
 
 class RiskCrud:
@@ -22,3 +23,21 @@ class RiskCrud:
             self.s.add(row)
             self.s.flush()
         return row
+
+    def valuation_on(self, day: str) -> Valuation | None:
+        return self.s.scalars(select(Valuation).where(Valuation.date == day)).first()
+
+    def add_valuation(self, v: Valuation) -> Valuation:
+        self.s.add(v)
+        self.s.flush()
+        return v
+
+    def last_valuation_before(self, day: str) -> Valuation | None:
+        return self.s.scalars(select(Valuation).where(Valuation.date < day).order_by(Valuation.date.desc())).first()
+
+    def valuations(self, frm: str, to: str) -> list[Valuation]:
+        return list(
+            self.s.scalars(
+                select(Valuation).where(Valuation.date >= frm, Valuation.date <= to).order_by(Valuation.date)
+            )
+        )

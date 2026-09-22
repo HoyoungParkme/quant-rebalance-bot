@@ -10,16 +10,16 @@ import csv
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 
-from app.core.errors import DataNotReady
+from app.core.errors import DataNotReady, Precondition
 from app.core.pit import PointInTime
 from app.domains.decision import scoring
 from app.domains.decision.crud import DecisionCrud
-from app.domains.decision.models import Decision, Score, StrategyConfig
+from app.domains.decision.models import Decision, RuleReview, Score, StrategyConfig
 from app.domains.marketdata.service import MarketDataService
 
 RESEARCH_TOP60 = Path(__file__).resolve().parents[4] / "docs" / "research" / "05-paper-run-1m" / "top60_by_month.csv"
@@ -96,6 +96,12 @@ class DecisionService:
         self.replay_portfolio = replay_portfolio or Portfolio(total=1_000_000, index_value=0)
         self.code_version = code_version
         self.notifier = notifier
+
+    def _factors(self, pit: PointInTime) -> pd.DataFrame:
+        """그 시점의 지표 표. 재점검이 월마다 부른다."""
+        if not self.md.has_bars_on(pit):
+            raise DataNotReady(f"{pit.asof} 일봉이 없다")
+        return scoring.compute_factors(self.md.bars(pit, 252), self.md.financials(pit), self.md.shares())
 
     def _compute(self, pit: PointInTime, cfg: StrategyConfig, portfolio: Portfolio):
         """decide_month_end 2~10단계. 저장·알림은 하지 않는다."""
@@ -177,6 +183,108 @@ class DecisionService:
             self.notifier("order", text)
         return d
 
+    # ----- 규칙 재점검 (QBOT-UC-001 UC-H3) -----
+    def review_rules(self, asof: date, months: int = 36) -> RuleReview:
+        """후보 지표마다 "상위 10% - 하위 10%"의 다음 달 수익률 차이를 모아 t값을 낸다.
+
+        설정을 바꾸지는 않는다. 사람이 approve_review로 승인해야 다음 달 판단부터 적용된다.
+        """
+        ends = self.md.month_ends_until(asof, months + 1)
+        if len(ends) < 7:
+            raise DataNotReady(f"월말이 {len(ends)}개뿐이다. 재점검하려면 최소 7개월이 필요하다")
+        cfg = self.crud.config_effective(asof.isoformat())
+        current = set(json.loads(cfg.factors_json)) if cfg else set()
+        samples: dict[str, list[float]] = {f: [] for f in CANDIDATE_FACTORS}
+        for i in range(len(ends) - 1):
+            pit = PointInTime(date.fromisoformat(ends[i]))
+            try:
+                factors = self._factors(pit)
+            except DataNotReady:
+                continue
+            if cfg is not None:  # 실제로 살 수 있는 종목만 본다. 동전주·거래 없는 종목은 대상이 아니다
+                factors = scoring.apply_universe(factors, _scoring_config(cfg))
+            cur, nxt = self.md.closes_on(ends[i]), self.md.closes_on(ends[i + 1])
+            forward = (nxt / cur - 1).replace([float("inf"), float("-inf")], pd.NA).dropna()
+            for name, direction in CANDIDATE_FACTORS.items():
+                if name not in factors:
+                    continue
+                v = factor_spread(factors[name], forward, direction)
+                if v is not None:
+                    samples[name].append(v)
+
+        results = {}
+        for name, xs in samples.items():
+            if len(xs) < 6:
+                results[name] = {"months": len(xs), "mean": None, "t": None, "in_use": name in current}
+                continue
+            arr = pd.Series(xs)
+            t = float(arr.mean() / (arr.std(ddof=1) / (len(arr) ** 0.5))) if arr.std(ddof=1) else 0.0
+            results[name] = {
+                "months": len(xs),
+                "mean": round(float(arr.mean()), 5),
+                "t": round(t, 2),
+                "in_use": name in current,
+            }
+        adopted = sorted(n for n, r in results.items() if r["t"] is not None and r["t"] >= ADOPT_T)
+        diff = {
+            "added": sorted(set(adopted) - current),
+            "removed": sorted(current - set(adopted)),
+            "kept": sorted(current & set(adopted)),
+        }
+        row = RuleReview(
+            asof=asof.isoformat(),
+            results_json=json.dumps(results, ensure_ascii=False),
+            adopted_json=json.dumps(adopted),
+            diff_json=json.dumps(diff, ensure_ascii=False),
+        )
+        self.crud.s.add(row)
+        self.crud.s.flush()
+        return row
+
+    def approve_review(self, review_id: int, command_id: int | None = None) -> StrategyConfig:
+        """재점검 결과를 받아들여 새 전략 설정을 만든다. 다음 판단부터 적용된다."""
+        row = self.crud.s.get(RuleReview, review_id)
+        if row is None:
+            raise Precondition(f"재점검 기록 {review_id}가 없다")
+        if row.decision == "approved":
+            raise Precondition("이미 승인된 재점검이다")
+        adopted = json.loads(row.adopted_json)
+        if not adopted:
+            raise Precondition("채택할 지표가 없다. 설정을 비울 수는 없다")
+        base = self.crud.config_effective(row.asof)
+        if base is None:
+            raise Precondition(f"{row.asof} 시점에 적용되던 전략 설정이 없다")
+        cfg = StrategyConfig(
+            factors_json=json.dumps({k: CANDIDATE_FACTORS[k] for k in adopted}),
+            min_price=base.min_price,
+            min_amount20=base.min_amount20,
+            min_mcap=base.min_mcap,
+            n_holdings=base.n_holdings,
+            trend_filter=base.trend_filter,
+            index_weight=base.index_weight,
+            effective_from=(date.fromisoformat(row.asof) + timedelta(days=1)).isoformat(),
+            approved_by_command_id=command_id,
+            source_review_id=row.id,
+        )
+        self.crud.add_config(cfg)
+        row.decision, row.decided_by_command_id = "approved", command_id
+        row.decided_at = self.md.clock.now().isoformat(timespec="seconds")
+        return cfg
+
+    def describe_review(self, row: RuleReview) -> str:
+        results, diff = json.loads(row.results_json), json.loads(row.diff_json)
+        lines = [f"{row.asof} 규칙 재점검 (기록 {row.id})"]
+        for name, r in sorted(results.items()):
+            mark = "사용 중" if r["in_use"] else "미사용"
+            if r["t"] is None:
+                lines.append(f"  {name}: 표본 {r['months']}개월 부족 ({mark})")
+            else:
+                lines.append(f"  {name}: 월 {r['mean']:+.4f} t={r['t']:+.2f} 표본 {r['months']}개월 ({mark})")
+        lines.append(f"  채택 제안: 추가 {diff['added'] or '없음'} / 제외 {diff['removed'] or '없음'}")
+        lines.append("  ※ 시가총액은 현재 주식 수로 계산한다(과거 주식 수 미보관). EP·SP·TURN20에 영향")
+        lines.append(f"  적용하려면 review_approve --review-id {row.id} --confirm")
+        return "\n".join(lines)
+
     def _replay_portfolio(self, real, cfg) -> Portfolio:
         """재현의 자금. 그날 실제 판단이 있으면 그때 쓴 예산을 되살리고, 없으면 고정값."""
         if real is not None and real.budget_per_slot:
@@ -247,3 +355,22 @@ def plan_of(crud: DecisionCrud, decision: Decision) -> ExecutionPlan:
         index_rebalance=bool(decision.index_rebalance),
         cash_switch=bool(decision.cash_switch),
     )
+
+
+CANDIDATE_FACTORS = {"EP": 1, "SP": 1, "ROE": 1, "OPG": 1, "OPG_Q": 1, "VOL60": -1, "TURN20": -1}
+ADOPT_T = 2.0  # 채택 기준. 검증 자료(03-factor-validation)와 같은 문턱
+MIN_NAMES = 100  # 한 달에 이만큼은 있어야 십분위가 의미 있다
+
+
+def factor_spread(values: pd.Series, forward: pd.Series, direction: int) -> float | None:
+    """상위 10% - 하위 10% 다음 달 수익률 차이. 방향이 -1이면 부호를 뒤집는다."""
+    v = values.dropna()
+    r = forward.reindex(v.index).dropna()
+    v = v.reindex(r.index)
+    if len(v) < MIN_NAMES:
+        return None
+    lo, hi = v.quantile(0.1), v.quantile(0.9)
+    top, bot = r[v >= hi].mean(), r[v <= lo].mean()
+    if pd.isna(top) or pd.isna(bot):
+        return None
+    return float(direction * (top - bot))

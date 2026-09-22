@@ -182,6 +182,9 @@ class Collector:
                 alerts.append(f"{inst.name} {fi.title} ({fi.rcept_date})")
             if rows is not None:
                 self._add_snapshots(inst, f, fi, rows)
+            # 공시 하나마다 끊는다. 30일치를 한 트랜잭션으로 잡으면 적재하는 몇 분 동안
+            # 봇의 다른 쓰기가 전부 "database is locked"로 막힌다
+            self.crud.s.commit()
         return added, alerts
 
     def _add_snapshots(self, inst: Instrument, f: Filing, fi: FilingInfo, rows) -> None:

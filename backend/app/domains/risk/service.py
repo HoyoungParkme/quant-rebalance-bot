@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 
 from app.core.clock import Clock
 from app.core.errors import Precondition
 from app.domains.risk.crud import RiskCrud
-from app.domains.risk.models import BotState
+from app.domains.risk.models import BotState, Valuation
 from app.domains.trading.ports import EquitySnapshot, OrderRequest
 
 GATE_REASONS = frozenset(
@@ -110,3 +111,77 @@ class RiskService:
     def touch_heartbeat(self) -> None:
         s = self.state()
         s.last_heartbeat_at = self._now()
+
+
+class ValuationRecorder:
+    """일별 평가액과 손실 한도 (QBOT-MS-001 RiskService.record_valuation).
+
+    입출금을 빼고 고점을 갱신한다. 돈을 넣었다고 고점이 오르면, 그 뒤 원래 자리로 돌아온 것이
+    손실로 잡혀 매수가 멈춘다. 반대로 출금하면 손실 한도에 걸리기 쉬워진다.
+    """
+
+    def __init__(
+        self,
+        risk: RiskService,
+        balance_fn,
+        flow_fn=None,
+        notify=None,
+        max_drawdown: float = 0.30,
+        index_etf: str = "069500",
+    ) -> None:
+        self.risk = risk
+        self.balance_fn = balance_fn
+        self.flow_fn = flow_fn or (lambda day: 0)
+        self.notify = notify
+        self.max_drawdown = max_drawdown
+        self.index_etf = index_etf
+
+    def record(self, d: date) -> Valuation:
+        bal = self.balance_fn()
+        day = d.isoformat()
+        flow = self.flow_fn(day)  # 사람이 "입금이다"라고 받아들인 금액만 외부 유입으로 센다
+        s = self.risk.state()
+        total = bal.total_equity
+
+        row = self.risk.crud.valuation_on(day)
+        # 같은 날 두 번 돌려도(재시작·수동 재실행) 입출금이 두 번 더해지면 안 된다. 이미 반영한 만큼을 뺀다
+        new_flow = flow - (row.external_flow if row else 0)
+        s.principal = (s.principal or 0) + new_flow
+        if s.principal <= 0:
+            s.principal = total  # 첫 기록. 지금 있는 돈이 원금이다
+        # 입출금만큼 고점 기준선을 같이 옮긴다. MS-001 4단계는 "고점과 (평가액-입금)을 비교"라고 적었지만
+        # 그러면 1,000만원을 넣은 뒤에는 폭락해도 고점 대비 플러스라 손실 한도가 영영 안 걸린다
+        s.peak_equity = (s.peak_equity or 0) + new_flow
+        if total > s.peak_equity or s.peak_equity <= 0:
+            s.peak_equity = total
+        drawdown = (total / s.peak_equity - 1) if s.peak_equity else 0.0
+        pnl = (total / s.principal - 1) if s.principal else 0.0
+
+        idx = bal.holdings.get(self.index_etf)
+        index_value = idx.value if idx else 0
+        fields = {
+            "mode": self.risk.mode,
+            "cash": bal.cash,
+            "index_value": index_value,
+            "stock_value": max(total - bal.cash - index_value, 0),
+            "total": total,
+            "external_flow": flow,
+            "drawdown": drawdown,
+            "pnl_vs_principal": pnl,
+        }
+        if row is None:
+            row = self.risk.crud.add_valuation(Valuation(date=day, **fields))
+        else:
+            for k, v in fields.items():
+                setattr(row, k, v)
+        s.updated_at = self.risk._now()
+
+        if drawdown <= -self.max_drawdown and not s.buy_suspended:
+            s.buy_suspended = 1
+            if self.notify:
+                self.notify(
+                    "error",
+                    f"고점 대비 {drawdown:.1%} (한도 -{self.max_drawdown:.0%}). 새 매수를 멈춘다. "
+                    f"평가액 {total:,}원, 고점 {s.peak_equity:,}원. 계속하려면 resume reset_peak",
+                )
+        return row

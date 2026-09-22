@@ -9,8 +9,10 @@ from app.domains.marketdata.models import (
     DailyBar,
     Filing,
     FinancialSnapshot,
+    IndexLevel,
     Instrument,
     InstrumentStatus,
+    TradingCalendar,
 )
 
 
@@ -57,6 +59,29 @@ class MarketDataCrud:
             .limit(n)
         )
         return sorted(self.s.scalars(stmt))
+
+    def month_ends_until(self, day: str, n: int) -> list[str]:
+        """달력에서 월말로 표시된 거래일 최근 n개. 규칙 재점검이 월 단위로 훑는다."""
+        stmt = (
+            select(TradingCalendar.date)
+            .where(TradingCalendar.date <= day, TradingCalendar.is_month_end == 1)
+            .order_by(TradingCalendar.date.desc())
+            .limit(n)
+        )
+        return sorted(self.s.scalars(stmt))
+
+    def closes_on(self, day: str) -> dict[int, float]:
+        """그날 종가. 종목 id → 종가. 판(series_no)이 여럿이면 가장 큰 판.
+
+        판 번호 오름차순으로 읽어 마지막 값이 남게 한다. collected_at으로 고르면 적재로 받은
+        과거 일봉은 수집 시각이 전부 적재일이라 아무 판이나 뽑힌다.
+        """
+        rows = self.s.execute(
+            select(DailyBar.instrument_id, DailyBar.series_no, DailyBar.close)
+            .where(DailyBar.trade_date == day)
+            .order_by(DailyBar.instrument_id, DailyBar.series_no)
+        )
+        return {iid: float(close) for iid, _sn, close in rows}
 
     def statuses_on(self, day: str) -> list[InstrumentStatus]:
         stmt = select(InstrumentStatus).where(
@@ -197,3 +222,11 @@ class MarketDataCrud:
             self.s.add(IndexLevel(index_name=index_name, date=day, close=close))
         else:
             row.close = close
+
+    def index_closes_between(self, index_name: str, frm: str, to: str) -> dict[str, float]:
+        rows = self.s.execute(
+            select(IndexLevel.date, IndexLevel.close).where(
+                IndexLevel.index_name == index_name, IndexLevel.date >= frm, IndexLevel.date <= to
+            )
+        )
+        return {d: float(c) for d, c in rows}

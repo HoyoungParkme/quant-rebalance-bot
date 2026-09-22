@@ -270,6 +270,15 @@ class MarketDataService:
         bar = self.crud.last_bar(inst.id) if inst else None
         return int(bar.close) if bar else 0
 
+    def month_ends_until(self, asof: date, n: int) -> list[str]:
+        return self.crud.month_ends_until(asof.isoformat(), n)
+
+    def closes_on(self, day: str) -> pd.Series:
+        """그날 종가를 종목 코드로. 규칙 재점검이 월 수익률을 낼 때 쓴다."""
+        by_id = {i.id: c for c, i in self.crud.instrument_by_code().items()}
+        closes = self.crud.closes_on(day)
+        return pd.Series({by_id[i]: v for i, v in closes.items() if i in by_id}, dtype="float64")
+
     def instrument_ids(self) -> dict[str, int]:
         """종목 코드 → 내부 id. 매매 도메인이 주문 행을 만들 때 쓴다."""
         return {c: i.id for c, i in self.crud.instrument_by_code().items()}

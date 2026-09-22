@@ -146,3 +146,21 @@ def test_unknown_stock_can_be_accepted_and_cleared(session):
     w.svc.accept_reconciliation("증권사 배정 물량")
     assert made == {"111111": 99}
     assert w.svc.reconcile().result == "ok" and blocked == []
+
+
+def test_accepting_a_loss_is_not_a_deposit(session):
+    """계좌가 기록보다 적은 게 '내가 놓친 손실'이면 원금·고점을 옮기면 안 된다.
+
+    옮기면 그 손실이 손실 한도에서 사라진다. 입출금 금액은 사람이 따로 밝힌다.
+    """
+    w, _, _ = make(session, holdings={"000001": 2}, cash=PRICE)
+    w.svc.reconcile()
+    w.broker.cash -= 400_000
+    w.svc.reconcile()
+    w.svc.accept_reconciliation("원인 모름")
+    assert w.svc.crud.accepted_flow_on("2026-09-23") == 0
+
+    w.broker.cash += 900_000
+    w.svc.reconcile()
+    w.svc.accept_reconciliation("내 계좌에서 입금", external_flow=900_000)
+    assert w.svc.crud.accepted_flow_on("2026-09-23") == 900_000

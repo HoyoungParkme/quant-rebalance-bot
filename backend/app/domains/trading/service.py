@@ -105,6 +105,7 @@ class OrderExecutor:
         price: int,
         order_type: str = "market",
         attempt: int = 0,
+        wait: bool = True,
     ) -> TradeOrder:
         """같은 (판단, 종목, 방향, 시도)으로 두 번 불러도 증권사 호출은 한 번이다."""
         key = f"{decision_id}:{code}:{side}" + (f"#{attempt}" if attempt else "")
@@ -113,7 +114,7 @@ class OrderExecutor:
             if o.status in CLOSED_STATUSES:
                 return o
             if o.status in ("unknown", "sent"):
-                return self._confirm(o, price)  # 전송은 건너뛰고 체결 확인부터
+                return self._confirm(o, price) if wait else o  # 전송은 건너뛰고 체결 확인부터
             # planned(아직 안 보냄) · rejected(확실히 미체결)는 아래에서 다시 판정한다
 
         req = OrderRequest(code=code, side=side, qty=qty, price=price, order_type=order_type)
@@ -142,7 +143,8 @@ class OrderExecutor:
 
         o.broker_order_no, o.status, o.sent_at = no, "sent", self._now()
         self.s.commit()
-        return self._confirm(o, price)
+        # 장 시작 전에 낸 주문은 09시 동시호가까지 체결되지 않는다. 기다리면 제한 시간에 걸려 취소된다
+        return self._confirm(o, price) if wait else o
 
     def _reject(self, o: TradeOrder | None, args: tuple, reason: str | None) -> TradeOrder:
         if o is None:
@@ -436,8 +438,13 @@ class TradingService:
         return self.executor.reconcile_unknown()
 
     # ----- 판단 실행 (QBOT-SEQ-001 SEQ-4) -----
-    def execute(self, decision) -> ExecutionResult:
-        """월말 판단을 주문으로 옮긴다. 매도 먼저, 매도 대금이 들어온 계좌로 매수."""
+    def execute(self, decision, phase: str = "all") -> ExecutionResult:
+        """월말 판단을 주문으로 옮긴다. 매도 먼저, 매도 대금이 들어온 계좌로 매수.
+
+        스케줄은 이것을 둘로 나눠 부른다(QBOT-INFRA-001 8.1). 08:40에 `sell`로 장 시작 전
+        동시호가에 매도를 걸어 두고, 09:05에 `buy`로 체결을 확인한 뒤 그 돈으로 산다.
+        `all`은 명령줄에서 한 번에 돌릴 때 쓴다.
+        """
         if decision.status not in ("pending", "running", "partial"):
             raise InvalidState(f"{decision.status} 상태의 판단은 실행할 수 없다")
         state = self.state_fn()
@@ -460,19 +467,31 @@ class TradingService:
         targets = set(plan.picks) | ({self.index_etf} if plan.index_weight > 0 else set())
         halted = self.halted_codes_fn()
 
-        for code, qty in sorted(held.items()):
-            if code in targets or qty <= 0:
-                continue
-            if code in halted:  # 오늘은 못 판다. 행만 남기고 retry_held_sells가 매일 다시 본다
-                self._hold_sell(decision.id, ids.get(code), code, qty)
-                res.held.append(code)
-                continue
-            self._try(
-                res,
-                code,
-                "sell",
-                lambda c=code, q=qty: self.executor.send(decision.id, ids[c], c, "sell", q, self.price_fn(c)),
-            )
+        if phase in ("all", "sell"):
+            wait = phase == "all"  # 동시호가 주문은 기다리지 않는다. 09시까지 체결되지 않는다
+            for code, qty in sorted(held.items()):
+                if code in targets or qty <= 0:
+                    continue
+                if code in halted:  # 오늘은 못 판다. 행만 남기고 retry_held_sells가 매일 다시 본다
+                    self._hold_sell(decision.id, ids.get(code), code, qty)
+                    res.held.append(code)
+                    continue
+                self._try(
+                    res,
+                    code,
+                    "sell",
+                    lambda c=code, q=qty: self.executor.send(
+                        decision.id, ids[c], c, "sell", q, self.price_fn(c), wait=wait
+                    ),
+                    counted=wait,
+                )
+        if phase == "sell":
+            self.s.commit()
+            return res  # 체결은 09시에 확인한다. 판단은 running으로 둔다
+
+        if phase == "buy":
+            res.sold = self.confirm_open_orders(decision.id)  # 동시호가에 걸어 둔 매도 확인
+            held = self._held_by_code()  # 팔린 만큼 보유가 줄었다
 
         bal = self.broker.balance()
         cash = bal.cash
@@ -506,7 +525,8 @@ class TradingService:
 
         # 관문에 막힌 것이 하나라도 있으면 끝난 것이 아니다. done은 다시 실행할 수 없다
         refused = [c for c, r in res.skipped.items() if r in GATE_REASONS]
-        decision.status = "partial" if (res.held or res.errors or refused) else "done"
+        still_held = {c for c, q in self._held_by_code().items() if q > 0 and c not in targets}
+        decision.status = "partial" if (res.held or res.errors or refused or still_held) else "done"
         self.s.commit()
         if self.notify:
             self.notify("fill", f"{decision.asof} 실행: {res.summary()}")
@@ -521,13 +541,18 @@ class TradingService:
                 out[code] = p.qty
         return out
 
-    def _try(self, res: ExecutionResult, code: str, side: str, send) -> bool:
+    def _try(self, res: ExecutionResult, code: str, side: str, send, counted: bool = True) -> bool:
         """주문 하나를 보내고 결과를 모은다. 하나가 실패해도 나머지는 계속한다."""
         try:
             o = send()
         except Exception as e:  # noqa: BLE001 - 종목 하나의 실패로 리밸런싱 전체를 멈추지 않는다
             res.errors.append(f"{code} {side}: {e}")
             return False
+        if not counted:  # 기다리지 않는 주문. 성공은 체결 확인 뒤에 세지만 거부는 지금 남긴다
+            if o.status == "rejected":
+                res.skipped[code] = o.reject_reason or "rejected"
+                return False
+            return True
         if o.status in ("filled", "partial"):
             left = o.qty - self.crud.filled_qty(o.id)
             if side == "sell" and left > 0:
@@ -684,8 +709,14 @@ class TradingService:
             lines.append(f"  예수금 {rec.broker_cash:,}원")
         return "\n".join(lines)
 
-    def accept_reconciliation(self, reason: str, command_id: int | None = None) -> Reconciliation:
-        """계좌를 옳다고 보고 보유 기록을 덮어쓴다 (UC-H6). 사람이 이유를 남겨야 한다."""
+    def accept_reconciliation(
+        self, reason: str, command_id: int | None = None, external_flow: int = 0
+    ) -> Reconciliation:
+        """계좌를 옳다고 보고 보유 기록을 덮어쓴다 (UC-H6). 사람이 이유를 남겨야 한다.
+
+        `external_flow`는 그 차액 중 진짜 입출금인 금액이다. 기본값 0은 "우리 기록이 틀렸다"는 뜻이고,
+        그때는 원금·고점 기준선을 건드리지 않아 손실이 손실 한도에 그대로 남는다.
+        """
         rec = self.crud.last_mismatch()
         if rec is None:
             raise Precondition("정리할 불일치 대조가 없다")
@@ -701,7 +732,7 @@ class TradingService:
         for p in self.crud.positions():
             if self.code_of(p.instrument_id) not in bal.holdings:
                 self.crud.upsert_position(p.instrument_id, 0, p.avg_cost, now, "reconcile")
-        rec.resolution, rec.resolved_at = "accepted", now
+        rec.resolution, rec.resolved_at, rec.external_flow = "accepted", now, external_flow
         rec.resolved_by_command_id = command_id
         rec.reason = f"{reason[:150]} / {rec.reason or ''}"[:200]
         self.unblock_orders_fn()
@@ -728,3 +759,18 @@ class TradingService:
                 }
             )
         return out
+
+    def confirm_open_orders(self, decision_id: int | None = None) -> list[str]:
+        """보낸 주문의 체결을 확인하고 기록한다. 동시호가 매도를 09시에 확인할 때 쓴다."""
+        done = []
+        for o in self.crud.orders_by_status("sent", "unknown"):
+            if decision_id is not None and o.decision_id != decision_id:
+                continue
+            code = self.code_of(o.instrument_id)
+            try:
+                after = self.executor._confirm(o, o.limit_price or self.price_fn(code or ""))
+            except Exception:  # noqa: BLE001 - 하나가 막혀도 나머지를 확인한다
+                continue
+            if code and after.status in ("filled", "partial") and o.side == "sell":
+                done.append(code)
+        return done

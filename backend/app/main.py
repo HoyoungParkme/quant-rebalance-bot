@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -20,9 +23,11 @@ from app.domains.marketdata.adapters.kis import KisAdapter
 from app.domains.marketdata.service import MarketDataService, pit_of
 from app.domains.ops.adapters.telegram import TelegramAdapter
 from app.domains.ops.service import Masker, OpsService
-from app.domains.risk.service import OrderGate, RiskService
+from app.domains.reporting.service import ReportingService
+from app.domains.risk.service import OrderGate, RiskService, ValuationRecorder
 from app.domains.trading.adapters.kis import KisOrderAdapter
 from app.domains.trading.service import INDEX_ETF_CODE, TradingService
+from app.entry.schedule.jobs import Jobs, build_scheduler
 from app.entry.telegram.poller import TelegramPoller
 from app.entry.tools import (
     BACKFILL_SCHEMA,
@@ -35,6 +40,9 @@ from app.entry.tools import (
     RECONCILE_SCHEMA,
     REPLAY_SCHEMA,
     RESUME_SCHEMA,
+    REVIEW_APPROVE_SCHEMA,
+    REVIEW_RUN_SCHEMA,
+    RUN_SCHEMA,
     STATUS_SCHEMA,
     TELEGRAM_SCHEMA,
     ToolRegistry,
@@ -68,8 +76,11 @@ class App:
     ops: OpsService
     risk: RiskService
     trading: TradingService
+    valuation: ValuationRecorder
+    reporting: ReportingService
     tools: ToolRegistry
     poller: TelegramPoller
+    lock: threading.RLock
 
 
 def build(settings: Settings | None = None, session: Session | None = None) -> App:
@@ -142,6 +153,19 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         notify=lambda kind, text: notify(kind, text),
     )
     risk = RiskService(session, clock, settings.mode, cancel_open_orders=trading.cancel_open)
+    valuation = ValuationRecorder(
+        risk,
+        trading.balance,
+        flow_fn=trading.crud.accepted_flow_on,
+        notify=lambda kind, text: notify(kind, text),
+        max_drawdown=settings.max_drawdown,
+    )
+    reporting = ReportingService(
+        session,
+        index_closes=lambda name, frm, to: md.crud.index_closes_between(name, frm, to),
+        trade_stats=trading.crud.trade_stats,
+        positions_fn=trading.positions,
+    )
     notifier = TelegramAdapter(TelegramClient(settings.telegram_bot_token), settings.telegram_chat_id)
     ops = OpsService(
         session,
@@ -165,6 +189,7 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         notifier=notify,
     )
 
+    built: dict[str, App] = {}
     last_command: dict[str, int] = {}
 
     def record(sender, tool, args, allowed, error, text=None):
@@ -219,7 +244,7 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         else:
             lines.append("전략 설정: 있음")
         if args.get("register_autostart"):
-            lines.append("자동 시작 등록: 슬라이스 E에서 지원")
+            lines.append(register_autostart())
         return "\n".join(lines)
 
     def status_handler(args: dict) -> str:
@@ -245,6 +270,31 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
             f" (고점 재설정: {st.peak_equity:,}원, 다음 평가 때 새로 잡힘)" if args.get("reset_peak") else ""
         )
 
+    def review_run_handler(args: dict) -> str:
+        asof = date.fromisoformat(args["asof"]) if args.get("asof") else clock.today()
+        row = decision.review_rules(asof, int(args.get("months", 36)))
+        session.commit()
+        return decision.describe_review(row)
+
+    def review_approve_handler(args: dict) -> str:
+        cfg = decision.approve_review(int(args["review_id"]), command_id=last_command.get("id"))
+        session.commit()
+        return f"새 전략 설정 {cfg.id}. {cfg.effective_from}부터 적용: {cfg.factors_json}"
+
+    def run_handler(args: dict) -> str:
+        """상주 프로세스. 스케줄과 메신저 입구를 함께 돌린다 (QBOT-INFRA-001 C3)."""
+        app = built["app"]
+        jobs = Jobs(app, lock=app.lock)
+        jobs.run("재시작 정리", jobs.resume_after_restart, trading_only=False)
+        sched = build_scheduler(app, jobs)
+        sched.start()
+        notify("summary", "봇 시작. 스케줄과 명령 대기 중")
+        try:
+            poller.run_forever()
+        finally:
+            sched.shutdown(wait=False)
+        return "종료"
+
     def telegram_handler(args: dict) -> str:
         poller.run_forever()
         return "종료"
@@ -258,8 +308,10 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         return trading.describe_reconciliation(trading.reconcile())
 
     def reconcile_accept_handler(args: dict) -> str:
-        rec = trading.accept_reconciliation(args["reason"], command_id=last_command.get("id"))
-        return f"계좌 기준으로 맞췄다. 주문 멈춤 해제. (대조 {rec.id})"
+        flow = int(args.get("external_flow", 0))
+        rec = trading.accept_reconciliation(args["reason"], command_id=last_command.get("id"), external_flow=flow)
+        tail = f" 입출금 {flow:+,}원으로 기록" if flow else " (입출금 아님 — 원금·고점은 그대로)"
+        return f"계좌 기준으로 맞췄다. 주문 멈춤 해제.{tail} (대조 {rec.id})"
 
     def positions_handler(args: dict) -> str:
         rows = trading.positions()
@@ -294,8 +346,53 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
     tools.add(ToolSpec("positions", POSITIONS_SCHEMA, positions_handler))
     tools.add(ToolSpec("decide", DECIDE_SCHEMA, decide_handler, cli_only=True))
     tools.add(ToolSpec("execute", EXECUTE_SCHEMA, execute_handler, needs_confirm=True, cli_only=True))
+    tools.add(ToolSpec("review_run", REVIEW_RUN_SCHEMA, review_run_handler))
+    tools.add(ToolSpec("review_approve", REVIEW_APPROVE_SCHEMA, review_approve_handler, needs_confirm=True))
+    tools.add(ToolSpec("run", RUN_SCHEMA, run_handler, cli_only=True))
     tools.add(ToolSpec("replay", REPLAY_SCHEMA, replay_handler))
     tools.add(ToolSpec("backfill", BACKFILL_SCHEMA, backfill_handler, cli_only=True))
     tools.add(ToolSpec("install", INSTALL_SCHEMA, install_handler, cli_only=True))
-    poller = TelegramPoller(notifier, tools, clock, settings.telegram_chat_id, on_error=session.rollback)
-    return App(settings, session, clock, md, decision, ops, risk, trading, tools, poller)
+    lock = threading.RLock()  # 스케줄 스레드와 메신저 입구가 같은 세션을 쓴다. 한 번에 하나만
+    poller = TelegramPoller(notifier, tools, clock, settings.telegram_chat_id, lock=lock, on_error=session.rollback)
+    built["app"] = App(
+        settings, session, clock, md, decision, ops, risk, trading, valuation, reporting, tools, poller, lock
+    )
+    return built["app"]
+
+
+AUTOSTART_UNIT = """[Unit]
+Description=QBOT 퀀트 리밸런싱 봇
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={cwd}
+ExecStart={exe} run
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def register_autostart() -> str:
+    """부팅 때 봇이 뜨게 한다 (QBOT-INFRA-001 8.2). systemd가 없으면 방법만 알려 준다."""
+    exe = shutil.which("qbot") or str(Path(sys.executable).with_name("qbot"))
+    if not Path(exe.split()[0]).exists():  # python -m 으로 부르면 argv[0]는 모듈 경로라 못 쓴다
+        exe = f"{sys.executable} -m app.entry.cli.main"
+    unit = AUTOSTART_UNIT.format(cwd=Path(__file__).resolve().parents[1], exe=exe)
+    if not shutil.which("systemctl"):
+        return (
+            "자동 시작 등록: systemd가 없다. 윈도우 작업 스케줄러에 "
+            f'"{exe} run"을 부팅 시 실행으로 등록한다 (WSL이면 wsl.exe -e 로 감싼다)'
+        )
+    path = Path.home() / ".config" / "systemd" / "user" / "qbot.service"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(unit)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, check=False)
+    out = subprocess.run(["systemctl", "--user", "enable", "qbot.service"], capture_output=True, text=True, check=False)
+    if out.returncode != 0:
+        why = out.stderr.strip()[:80]
+        return f"자동 시작 등록: {path} 를 만들었다. 직접 켜야 한다 — systemctl --user enable --now qbot ({why})"
+    return f"자동 시작 등록: {path} 등록됨. 로그인 없이도 돌게 하려면 loginctl enable-linger {Path.home().name}"

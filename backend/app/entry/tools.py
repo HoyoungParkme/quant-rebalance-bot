@@ -119,11 +119,28 @@ RESUME_SCHEMA = {
 }
 TELEGRAM_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 RECONCILE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+RUN_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+REVIEW_RUN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "asof": {"type": "string", "format": "date", "pattern": r"^\d{4}-\d{2}-\d{2}$"},
+        "months": {"type": "integer", "minimum": 7, "maximum": 120},
+    },
+    "additionalProperties": False,
+}
+REVIEW_APPROVE_SCHEMA = {
+    "type": "object",
+    "properties": {"review_id": {"type": "integer", "minimum": 1}, "confirm": {"type": "boolean"}},
+    "required": ["review_id", "confirm"],
+    "additionalProperties": False,
+}
 POSITIONS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 RECONCILE_ACCEPT_SCHEMA = {
     "type": "object",
     "properties": {
         "reason": {"type": "string", "minLength": 1, "maxLength": 200},
+        # 차액 중 진짜 입출금인 금액. 기본 0 = "우리 기록이 틀렸다"(원금·고점 기준선을 건드리지 않는다)
+        "external_flow": {"type": "integer"},
         "confirm": {"type": "boolean"},
     },
     "required": ["reason", "confirm"],
