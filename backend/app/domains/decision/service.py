@@ -33,6 +33,17 @@ class Portfolio:
     index_value: int  # 지수 상장지수펀드 부분 평가액
 
 
+@dataclass(frozen=True)
+class ExecutionPlan:
+    """판단 하나를 주문으로 옮기는 데 필요한 것 전부. 매매 도메인이 이것만 보고 실행한다."""
+
+    picks: list[str]  # 점수 순
+    index_weight: float
+    n_holdings: int
+    index_rebalance: bool
+    cash_switch: bool
+
+
 @dataclass
 class ReplayResult:
     asof: date
@@ -75,11 +86,14 @@ class DecisionService:
         md: MarketDataService,
         portfolio_fn: Callable[[], Portfolio],
         code_version: str,
+        replay_portfolio: Portfolio | None = None,
         notifier: Callable[[str, str], None] | None = None,
     ) -> None:
         self.crud = DecisionCrud(session)
         self.md = md
         self.portfolio_fn = portfolio_fn
+        # 재현은 오늘 계좌가 아니라 고정된 자금으로 한다. 안 그러면 같은 날짜가 매번 다른 답을 낸다
+        self.replay_portfolio = replay_portfolio or Portfolio(total=1_000_000, index_value=0)
         self.code_version = code_version
         self.notifier = notifier
 
@@ -163,20 +177,24 @@ class DecisionService:
             self.notifier("order", text)
         return d
 
+    def _replay_portfolio(self, real, cfg) -> Portfolio:
+        """재현의 자금. 그날 실제 판단이 있으면 그때 쓴 예산을 되살리고, 없으면 고정값."""
+        if real is not None and real.budget_per_slot:
+            return _portfolio_from_budget(real.budget_per_slot, cfg)
+        return self.replay_portfolio
+
     def replay(self, asof: date, compare_to: str = "stored", portfolio: Portfolio | None = None) -> ReplayResult:
         """QBOT-MS-001 DecisionService.replay. 주문·알림 없음. status=replay로 저장."""
         pit = PointInTime(asof)
         cfg = self.crud.config_effective(asof.isoformat())
         if cfg is None:
             raise DataNotReady("전략 설정이 없다")
-        pf = portfolio or self.portfolio_fn()
+        real = self.crud.real_decision(asof.isoformat(), "paper") or self.crud.real_decision(asof.isoformat(), "live")
+        pf = portfolio or self._replay_portfolio(real, cfg)
         sel, budget, cash_switch, index_rebalance = self._compute(pit, cfg, pf)
         d = self._store(pit, "paper", cfg, sel, budget, cash_switch, index_rebalance, "replay")
         got_rank = list(sel.top60.index)
         if compare_to == "stored":
-            real = self.crud.real_decision(asof.isoformat(), "paper") or self.crud.real_decision(
-                asof.isoformat(), "live"
-            )
             if real is None:
                 compare_to = "research_file"  # 저장된 판단이 없으면 검증 파일과 비교 (QBOT-API-001 replay)
             else:
@@ -190,6 +208,10 @@ class DecisionService:
             return ReplayResult(asof, sel.picked, "research_file", ref == got, _diff(ref, got))
         _ = d
         return ReplayResult(asof, sel.picked, "none", None, [])
+
+
+def _portfolio_from_budget(budget: int, cfg: StrategyConfig) -> Portfolio:
+    return Portfolio(total=round(budget * cfg.n_holdings / max(1 - cfg.index_weight, 1e-9)), index_value=0)
 
 
 def _f(v) -> float | None:
@@ -211,3 +233,17 @@ def _research_top60(asof: date) -> list[str]:
         return []
     rows = [r for r in csv.DictReader(open(RESEARCH_TOP60)) if r["asof"] == asof.isoformat()]
     return [r["code"] for r in sorted(rows, key=lambda r: int(r["rank"]))]
+
+
+def plan_of(crud: DecisionCrud, decision: Decision) -> ExecutionPlan:
+    """판단 → 실행 계획. 매매 도메인에 주입한다(매매가 판단 테이블을 직접 읽지 않게)."""
+    cfg = crud.config(decision.strategy_config_id)
+    if cfg is None:
+        raise DataNotReady(f"판단 {decision.id}의 전략 설정이 없다")
+    return ExecutionPlan(
+        picks=crud.picks(decision.id),
+        index_weight=cfg.index_weight,
+        n_holdings=cfg.n_holdings,
+        index_rebalance=bool(decision.index_rebalance),
+        cash_switch=bool(decision.cash_switch),
+    )

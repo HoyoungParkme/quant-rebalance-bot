@@ -14,10 +14,11 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.core.clock import Clock
-from app.core.errors import BrokerUnavailable, Precondition
+from app.core.errors import BrokerUnavailable, Precondition, QbotError
 from app.core.pit import PointInTime
 from app.domains.marketdata.collect import Collector, CollectResult
 from app.domains.marketdata.crud import MarketDataCrud
+from app.domains.marketdata.models import Instrument
 
 MAX_FIN_AGE_DAYS = 500
 FIN_COLUMNS = [
@@ -244,6 +245,30 @@ class MarketDataService:
 
     def has_bars_on(self, pit: PointInTime) -> bool:
         return self.crud.has_bars_on(pit.asof.isoformat())
+
+    def ensure_instrument(self, code: str) -> int:
+        """종목표에 없으면 최소 정보로 만들어 준다. 계좌에만 있는 종목을 기록하려면 자리가 필요하다.
+
+        kind는 unknown이라 종목 선정 대상(common)에는 절대 들어가지 않는다.
+        """
+        inst = self.crud.instrument_by_code().get(code)
+        if inst is not None:
+            return inst.id
+        row = self.crud.add_instrument(Instrument(code=code, name=code, market="UNKNOWN", kind="unknown"))
+        self.crud.s.commit()
+        return row.id
+
+    def current_price(self, code: str) -> int:
+        """현재가. 증권사가 0이나 오류를 주면 마지막 종가로 갈음한다(수량 계산용 추정)."""
+        try:
+            p = self.broker.current_price(code) if self.broker is not None else 0
+        except QbotError:
+            p = 0
+        if p > 0:
+            return p
+        inst = self.crud.instrument_by_code().get(code)
+        bar = self.crud.last_bar(inst.id) if inst else None
+        return int(bar.close) if bar else 0
 
     def instrument_ids(self) -> dict[str, int]:
         """종목 코드 → 내부 id. 매매 도메인이 주문 행을 만들 때 쓴다."""

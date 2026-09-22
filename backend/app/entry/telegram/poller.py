@@ -22,6 +22,8 @@ SINGLE_VALUE_ARG = {
     "gate_approve": "capital_krw",
     "review_approve": "review_id",
     "reconcile_accept": "reason",
+    "decide": "asof",
+    "execute": "asof",
 }
 
 

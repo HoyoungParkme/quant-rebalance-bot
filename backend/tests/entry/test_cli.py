@@ -1,9 +1,11 @@
 """명령줄 입구: 인자 파싱 → 도구 실행."""
 
 from datetime import date
+from types import SimpleNamespace
 
 from app.domains.decision.crud import DecisionCrud
 from app.domains.decision.service import seed_default_config
+from app.domains.trading.ports import Balance
 from app.entry.cli import main as cli
 from tests.domains.decision.helpers import seed_market
 
@@ -21,6 +23,11 @@ def test_cli_replay_runs_against_in_memory_app(session, monkeypatch, capsys):
         dart_api_key="d",
         telegram_bot_token="t",
         telegram_chat_id="1",
+    )
+    # 주문 계좌 조회를 가짜로 바꾼다. 진짜로 부르면 가짜 키로 증권사에 붙었다 실패하느라 느리다
+    monkeypatch.setattr(
+        "app.main.KisOrderAdapter",
+        lambda *a, **k: SimpleNamespace(balance=lambda: Balance(1_000_000, 3_000_000, {})),
     )
     monkeypatch.setattr("app.main.build", lambda: build(s, session))
     rc = cli.main(["replay", "--asof", "2025-05-30", "--compare-to", "none"])

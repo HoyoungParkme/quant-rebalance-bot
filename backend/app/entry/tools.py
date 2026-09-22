@@ -118,3 +118,30 @@ RESUME_SCHEMA = {
     "additionalProperties": False,
 }
 TELEGRAM_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+RECONCILE_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+POSITIONS_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+RECONCILE_ACCEPT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reason": {"type": "string", "minLength": 1, "maxLength": 200},
+        "confirm": {"type": "boolean"},
+    },
+    "required": ["reason", "confirm"],
+    "additionalProperties": False,
+}
+# decide·execute는 API-001에 없다. 스케줄(슬라이스 E)이 생기기 전까지 손으로 돌리기 위한 명령줄 전용이다
+DECIDE_SCHEMA = {
+    "type": "object",
+    "properties": {"asof": {"type": "string", "format": "date", "pattern": r"^\d{4}-\d{2}-\d{2}$"}},
+    "required": ["asof"],
+    "additionalProperties": False,
+}
+EXECUTE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "asof": {"type": "string", "format": "date", "pattern": r"^\d{4}-\d{2}-\d{2}$"},
+        "confirm": {"type": "boolean"},
+    },
+    "required": ["confirm"],
+    "additionalProperties": False,
+}

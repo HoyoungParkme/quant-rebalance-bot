@@ -14,20 +14,25 @@ from app.core.clock import Clock
 from app.core.db import make_engine, make_session_factory
 from app.core.settings import Settings, load_settings
 from app.domains.decision.crud import DecisionCrud
-from app.domains.decision.service import DecisionService, Portfolio, seed_default_config
+from app.domains.decision.service import DecisionService, Portfolio, plan_of, seed_default_config
 from app.domains.marketdata.adapters.dart import DartAdapter
 from app.domains.marketdata.adapters.kis import KisAdapter
-from app.domains.marketdata.service import MarketDataService
+from app.domains.marketdata.service import MarketDataService, pit_of
 from app.domains.ops.adapters.telegram import TelegramAdapter
 from app.domains.ops.service import Masker, OpsService
 from app.domains.risk.service import OrderGate, RiskService
 from app.domains.trading.adapters.kis import KisOrderAdapter
-from app.domains.trading.service import TradingService
+from app.domains.trading.service import INDEX_ETF_CODE, TradingService
 from app.entry.telegram.poller import TelegramPoller
 from app.entry.tools import (
     BACKFILL_SCHEMA,
+    DECIDE_SCHEMA,
+    EXECUTE_SCHEMA,
     HALT_SCHEMA,
     INSTALL_SCHEMA,
+    POSITIONS_SCHEMA,
+    RECONCILE_ACCEPT_SCHEMA,
+    RECONCILE_SCHEMA,
     REPLAY_SCHEMA,
     RESUME_SCHEMA,
     STATUS_SCHEMA,
@@ -95,8 +100,13 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
     md = MarketDataService(session, broker=broker, filings=filings, clock=clock)
 
     def portfolio() -> Portfolio:
-        # 매매 도메인(슬라이스 D2)이 생기기 전까지는 계획 자금을 쓴다
-        return Portfolio(total=settings.planned_capital, index_value=0)
+        """판단 예산의 바탕. 계좌를 못 읽으면 계획 자금으로 갈음한다(판단은 멈추지 않는다)."""
+        try:
+            bal = trading.balance()
+        except Exception:  # noqa: BLE001 - 계좌를 못 읽었다고 판단까지 멈추지 않는다
+            return Portfolio(total=settings.planned_capital, index_value=0)
+        idx = bal.holdings.get(INDEX_ETF_CODE)
+        return Portfolio(total=bal.total_equity or settings.planned_capital, index_value=idx.value if idx else 0)
 
     masker = Masker(
         [
@@ -110,12 +120,26 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
             settings.telegram_bot_token,
         ]
     )
+
+    def halted_codes() -> set[str]:
+        st = md.statuses_on(pit_of(clock.today()))
+        return {c for c, v in st.items() if "halted" in v}
+
     trading = TradingService(
         session,
         order_broker,
         OrderGate(session, settings.max_position_weight, settings.daily_order_cap_multiple),
         clock,
         md.instrument_ids,
+        mode=settings.mode,
+        plan_fn=lambda d: plan_of(DecisionCrud(session), d),
+        state_fn=lambda: risk.state_dict(),
+        ensure_instrument_fn=md.ensure_instrument,
+        price_fn=md.current_price,
+        halted_codes_fn=halted_codes,
+        block_orders_fn=lambda reason: risk.block_orders(reason),
+        unblock_orders_fn=lambda: risk.unblock_orders(),
+        notify=lambda kind, text: notify(kind, text),
     )
     risk = RiskService(session, clock, settings.mode, cancel_open_orders=trading.cancel_open)
     notifier = TelegramAdapter(TelegramClient(settings.telegram_bot_token), settings.telegram_chat_id)
@@ -132,10 +156,20 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         ops.notify(kind, text)
         session.commit()
 
-    decision = DecisionService(session, md, portfolio, code_version(), notifier=notify)
+    decision = DecisionService(
+        session,
+        md,
+        portfolio,
+        code_version(),
+        replay_portfolio=Portfolio(total=settings.planned_capital, index_value=0),
+        notifier=notify,
+    )
+
+    last_command: dict[str, int] = {}
 
     def record(sender, tool, args, allowed, error, text=None):
-        ops.record_command(sender, tool, args, allowed, error, result_text=text)
+        c = ops.record_command(sender, tool, args, allowed, error, result_text=text)
+        last_command["id"] = c.id
         session.commit()
 
     tools = ToolRegistry(allowed_senders={settings.telegram_chat_id}, record=record, on_error=session.rollback)
@@ -189,7 +223,12 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         return "\n".join(lines)
 
     def status_handler(args: dict) -> str:
-        return ops.status()
+        text = ops.status()
+        if risk.state_dict()["orders_blocked"]:
+            rec = trading.crud.last_mismatch()
+            if rec is not None:
+                text += "\n" + trading.describe_reconciliation(rec)
+        return text
 
     def halt_handler(args: dict) -> str:
         _, cancelled = risk.halt(args.get("reason"))
@@ -214,6 +253,47 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
     tools.add(ToolSpec("halt", HALT_SCHEMA, halt_handler, needs_confirm=True))
     tools.add(ToolSpec("resume", RESUME_SCHEMA, resume_handler, needs_confirm=True))
     tools.add(ToolSpec("telegram", TELEGRAM_SCHEMA, telegram_handler, cli_only=True))
+
+    def reconcile_handler(args: dict) -> str:
+        return trading.describe_reconciliation(trading.reconcile())
+
+    def reconcile_accept_handler(args: dict) -> str:
+        rec = trading.accept_reconciliation(args["reason"], command_id=last_command.get("id"))
+        return f"계좌 기준으로 맞췄다. 주문 멈춤 해제. (대조 {rec.id})"
+
+    def positions_handler(args: dict) -> str:
+        rows = trading.positions()
+        if not rows:
+            return "보유 종목 없음"
+        head = f"보유 {len(rows)}종목"
+        body = [
+            f"{r['code']} {r['qty']}주 평단 {r['avg_cost']:,} 현재 {r['price']:,} "
+            f"평가 {r['value']:,} 손익 {r['pnl']:+,}({r['pnl_pct']:+.1%})"
+            for r in rows
+        ]
+        return "\n".join([head, *body])
+
+    def decide_handler(args: dict) -> str:
+        d = decision.decide_month_end(date.fromisoformat(args["asof"]), settings.mode)
+        session.commit()
+        picks = DecisionCrud(session).picks(d.id)
+        return f"{d.asof} 판단 {d.status}: {len(picks)}종목 {', '.join(picks) or '없음'}"
+
+    def execute_handler(args: dict) -> str:
+        asof = args.get("asof")
+        pend = DecisionCrud(session).pending()
+        d = next((x for x in pend if x.asof == asof), None) if asof else (pend[0] if pend else None)
+        if d is None:
+            return "실행할 판단이 없다. 먼저 decide 를 돌린다"
+        res = trading.execute(d)
+        session.commit()
+        return f"{d.asof} 실행: {res.summary()}"
+
+    tools.add(ToolSpec("reconcile", RECONCILE_SCHEMA, reconcile_handler))
+    tools.add(ToolSpec("reconcile_accept", RECONCILE_ACCEPT_SCHEMA, reconcile_accept_handler, needs_confirm=True))
+    tools.add(ToolSpec("positions", POSITIONS_SCHEMA, positions_handler))
+    tools.add(ToolSpec("decide", DECIDE_SCHEMA, decide_handler, cli_only=True))
+    tools.add(ToolSpec("execute", EXECUTE_SCHEMA, execute_handler, needs_confirm=True, cli_only=True))
     tools.add(ToolSpec("replay", REPLAY_SCHEMA, replay_handler))
     tools.add(ToolSpec("backfill", BACKFILL_SCHEMA, backfill_handler, cli_only=True))
     tools.add(ToolSpec("install", INSTALL_SCHEMA, install_handler, cli_only=True))

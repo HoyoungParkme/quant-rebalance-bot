@@ -22,6 +22,9 @@ class DecisionCrud:
         )
         return self.s.scalar(stmt)
 
+    def config(self, config_id: int) -> StrategyConfig | None:
+        return self.s.get(StrategyConfig, config_id)
+
     def add_config(self, cfg: StrategyConfig) -> StrategyConfig:
         self.s.add(cfg)
         self.s.flush()

@@ -15,7 +15,7 @@ CODE = "005930"
 
 
 def make(session, broker=None):
-    broker = broker or FakeOrderBroker(holdings={CODE: Holding(CODE, 2, 40_000, 100_000)})
+    broker = broker or FakeOrderBroker(holdings={CODE: Holding(CODE, 2, 40_000, 100_000)}, fixed_total=True)
     session.add(BotState(id=1, mode="paper", updated_at="2026-09-22T09:00:00+09:00"))
     session.commit()
     return (
@@ -60,7 +60,7 @@ def test_unknown_code_is_refused_before_any_order(session):
 
 def test_gate_sees_snapshot_from_broker(session):
     """비중 상한은 증권사 잔고 기준으로 판정된다."""
-    broker = FakeOrderBroker(total=1_000_000, holdings={CODE: Holding(CODE, 2, 40_000, 100_000)})
+    broker = FakeOrderBroker(total=1_000_000, holdings={CODE: Holding(CODE, 2, 40_000, 100_000)}, fixed_total=True)
     svc, _ = make(session, broker)
     o = svc.send(1, CODE, "buy", 2, PRICE)  # 10만 보유 + 10만 매수 = 20% > 15%
     assert o.status == "rejected" and o.reject_reason == "concentration"

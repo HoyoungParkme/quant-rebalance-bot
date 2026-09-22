@@ -56,6 +56,9 @@ class Reconciliation(IdCreated, Base):
     bot_cash: Mapped[int] = mapped_column(Integer, nullable=False)
     broker_cash: Mapped[int] = mapped_column(Integer, nullable=False)
     result: Mapped[str] = mapped_column(String(8), nullable=False)
+    # 이 시점까지 반영한 체결. 다음 대조는 이 뒤의 체결만 더해 예수금을 설명한다.
+    # 시각으로 자르면 같은 초에 일어난 대조와 체결의 앞뒤를 가릴 수 없다
+    last_fill_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     resolution: Mapped[str | None] = mapped_column(String(8))
     reason: Mapped[str | None] = mapped_column(String(200))
     resolved_by_command_id: Mapped[int | None] = mapped_column(ForeignKey("command.id"))

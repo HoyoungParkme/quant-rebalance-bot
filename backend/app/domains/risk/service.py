@@ -11,6 +11,10 @@ from app.domains.risk.crud import RiskCrud
 from app.domains.risk.models import BotState
 from app.domains.trading.ports import EquitySnapshot, OrderRequest
 
+GATE_REASONS = frozenset(
+    {"no_state", "halted", "reconcile", "no_gate", "drawdown", "no_equity", "concentration", "daily_cap", "first_month"}
+)
+
 
 @dataclass(frozen=True)
 class GateVerdict:
@@ -90,6 +94,17 @@ class RiskService:
         if reset_peak and current_equity is not None:
             s.peak_equity, s.peak_reset_at = current_equity, self._now()
         s.halted, s.buy_suspended, s.updated_at = 0, 0, self._now()
+        return s
+
+    def block_orders(self, reason: str) -> BotState:
+        """계좌 불일치 등으로 새 주문을 막는다. 사람이 정리해야 풀린다 (UC-S4)."""
+        s = self.state()
+        s.orders_blocked, s.updated_at = 1, self._now()
+        return s
+
+    def unblock_orders(self) -> BotState:
+        s = self.state()
+        s.orders_blocked, s.updated_at = 0, self._now()
         return s
 
     def touch_heartbeat(self) -> None:

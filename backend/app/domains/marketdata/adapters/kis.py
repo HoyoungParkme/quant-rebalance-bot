@@ -54,6 +54,16 @@ class KisAdapter:
             end = (date.fromisoformat(f"{oldest[:4]}-{oldest[4:6]}-{oldest[6:]}") - timedelta(days=1)).isoformat()
         return sorted(out.values(), key=lambda b: b.date)
 
+    def current_price(self, code: str) -> int:
+        """현재가. 장 시작 전에는 전일 종가가 온다. 매수 수량 계산에 쓴다."""
+        body = self.c.get(
+            "/uapi/domestic-stock/v1/quotations/inquire-price",
+            "FHKST01010100",
+            {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code},
+        )
+        out = body.get("output") or {}
+        return int(float(out.get("stck_prpr") or 0))
+
     def instrument_list(self) -> list[InstrumentInfo]:
         out = []
         for m in self._master_fetch():
