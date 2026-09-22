@@ -65,11 +65,11 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 | 항목 | 내용 |
 |---|---|
 | 근거 | [[QBOT-SCN-001#S1]] · [[QBOT-SCN-001#S12]] · [[QBOT-SEQ-001#SEQ-1]] |
-| 구현 함수 | [[QBOT-MS-001#MarketDataService.collect_daily]] · KisAdapter(조회 부분) · DartAdapter · `infra/kis_client.py`(토큰, 초당 한도, 조회 재시도) · `infra/dart_client.py` · backfill |
+| 구현 함수 | [[QBOT-MS-001#MarketDataService.collect_daily]] · MarketDataService.backfill · Collector(`marketdata/collect.py`) · KisAdapter(조회) · DartAdapter · `infra/kis_client.py` · `infra/kis_master.py` · `infra/dart_client.py` |
 | API | [[QBOT-API-001#backfill]] · [[QBOT-API-001#install]] |
-| 테스트 | collect_daily 테스트 관점(가짜 포트). 모의 계좌로 실제 호출 1회: 종목 목록·일봉 10종목·거래일. 전자공시 실제 호출 1회: 어제 공시 목록 |
+| 테스트 | collect_daily 테스트 관점(가짜 포트) 10개: 종목·상태·일봉·지수, 상태 종료와 상장폐지, 수정주가 판 상승, 4분기 = 연간 - 3분기 누적, 다른 본의 숫자 거부, 재무 없는 공시는 다음 수집에 재시도, 3주 공백 뒤 구멍 없이 채움, 마스터 급감 시 폐지 처리 안 함, backfill 이어받기. 클라이언트 4개(오류 응답 예외, 토큰 무효 시 캐시 폐기, 마스터 규격, 회사코드 블록 파싱). 실제 API 연기 테스트 4개(`QBOT_LIVE_TESTS=1`): 일봉·지수·종목 목록·휴장일·전자공시 공시 목록·재무 → 통과 |
 | 선행 | A. 모의 계좌 앱 키와 전자공시 키가 있어야 실제 호출 테스트를 돌린다 |
-| 완료 | — |
+| 완료 | main `86b3927`, `93abad2` (2026-09-22). 발견: 종목 마스터 파일(kospi/kosdaq_code.mst) 하나에 전 종목의 이름·구분·관리종목·거래정지·경고·상장주식수가 있어 종목별 현재가 호출이 필요 없다. 공식 파서는 개행 포함 228/222자를 자르므로 개행을 뗀 여기서는 227/221자. 휴장일 조회(CTCA0903R)는 모의 키에서 "모의투자 TR이 아닙니다" → 조회는 실전 키가 필요. 전자공시 API는 접수 일자만 준다. 리뷰 9건 반영: 회사코드 표 정규식이 `<list>` 경계를 넘어 비상장사 코드가 상장사에 붙던 문제(재무가 엉뚱한 종목에 저장될 수 있었음), 오류 응답을 "자료 없음"으로 삼키던 문제, 토큰 무효 시 캐시 재사용, 재무 없는 공시가 영구 누락, 10일 고정 되돌아보기의 구멍, 잘린 달의 월말 오표시, 4분기 유도 시 연결·별도 혼용, 마스터 파일 비정상 시 대량 폐지, collect_daily 미커밋. 후속: backfill 스레드에 ORM 객체 전달로 SQLite 스레드 오류 → 문자열만 전달 |
 
 #### C2 알림과 메신저 입구
 
@@ -130,8 +130,8 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 | 시나리오 | 슬라이스 | 검증하는 것 |
 |---|---|---|
-| S11 과거 날짜 재현 | B3, C1 | 2025-05~2026-08 월말 20개 전부 검증 파일(`top60_by_month.csv`)과 일치. C1의 backfill 뒤에 돈다 |
-| S12 처음 설치 | A, C1, C2 | 빈 컴퓨터에서 install → backfill → replay → 자동 시작까지 |
+| S11 과거 날짜 재현 | B3, C1 | 2025-05~2026-08 월말 20개 전부 검증 파일(`top60_by_month.csv`)과 일치. C1의 backfill 뒤에 돈다. **진행 중**: 2026-09-22 일봉(2019~)·상태·지수 적재 후 공시(2023~) 적재. 전자공시 일일 한도(2만 건) 때문에 공시는 이틀 걸릴 수 있다 |
+| S12 처음 설치 | A, C1, C2 | 빈 컴퓨터에서 install → backfill → replay → 자동 시작까지. `install`과 `backfill`은 실제로 돌려 확인 |
 | S1 거래일 저녁 | C1, E | 실제 거래일에 수집·대조·평가액·요약이 순서대로 돈다 |
 | S2 + S3 월말 판단과 실행 | B3, D2 | 모의 계좌에서 판단 다음 날 10종목 매수, 다음 달 교체 |
 | S5 재시작 | D1 | 주문 전송 직후 강제 종료 → 재시작 → 중복 주문 0건 |
@@ -145,8 +145,9 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 ## 4. 미결사항
 
-되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일. [[QBOT-MS-001#Scorer.score]] 1~2단계: `OPG_Q`의 절단 범위는 [-1, 5]가 아니라 [-3, 5]이고 임계값은 `|op_q_prev| >= 1억`, `OPG`는 `op_annual_prev > 0`일 때만 (검증 quarterly.py·build_panel.py 기준). 같은 함수 3단계 뒤에 "이 제외를 백분위 계산 전에 한다"를 명시. [[QBOT-MS-001#DecisionService.decide_month_end]] 9단계: "최근 10개월 월말 종가 평균"은 "있는 만큼(최대 10개)의 평균보다 높지 않으면 현금"으로(검증 simulate.py 15행). [[QBOT-MS-001#Scorer.select]] 출력의 `top60`은 "상위 60 + 선정·건너뛴 행 전부"로.
+되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일. [[QBOT-MS-001#Scorer.score]] 1~2단계: `OPG_Q`의 절단 범위는 [-1, 5]가 아니라 [-3, 5]이고 임계값은 `|op_q_prev| >= 1억`, `OPG`는 `op_annual_prev > 0`일 때만 (검증 quarterly.py·build_panel.py 기준). 같은 함수 3단계 뒤에 "이 제외를 백분위 계산 전에 한다"를 명시. [[QBOT-MS-001#DecisionService.decide_month_end]] 9단계: "최근 10개월 월말 종가 평균"은 "있는 만큼(최대 10개)의 평균보다 높지 않으면 현금"으로(검증 simulate.py 15행). [[QBOT-MS-001#Scorer.select]] 출력의 `top60`은 "상위 60 + 선정·건너뛴 행 전부"로. [[QBOT-PRD-001#R2]]의 "잠정실적"은 v1에서 수집하지 않는다(거래소 공시, 다음 버전). [[QBOT-MS-001#MarketDataService.collect_daily]] 4단계 "종목마다 daily_bars"와 6단계 "instrument_status"는 마스터 파일 1회 다운로드로 대체. [[QBOT-INFRA-001]] 5장 인증 표에 "휴장일 조회는 실전 키 필요"와 "조회는 실전 키, 주문은 모드에 따라" 추가. 결산월 12월을 가정해 결산기 종료일을 정한다(비12월 결산 법인은 어긋남).
 
 - [x] B2의 일치 테스트 입력 크기 → 월말 5개 표본(689KB)을 저장소에, 21개월 전체는 로컬 환경 변수 `QBOT_RESEARCH_PANEL`
-- [ ] C1에서 전 종목 일봉을 모의 계좌 한도(초당 1건)로 받으면 약 40분이 걸린다. 실전 키(초당 20건)로 수집하고 주문만 모의로 낼지. 제안은 실전 조회 키를 수집에 쓴다. 조회는 돈이 움직이지 않는다
+- [x] C1 조회 키 → 실전 키로 수집(초당 15건으로 제한), 주문은 모드에 따라. `Settings.query_credentials`
 - [ ] D1의 실제 주문 테스트를 모의 계좌 어느 종목으로 할지. 제안은 거래량 많은 대형주 1주
+- [ ] 2019~2022년 재무는 전자공시 API 호출량(2,500사 × 4보고서 × 4년 ≈ 4만 건)이 커서 v1 적재 범위(2023~)에서 뺐다. 연 1회 재점검(R13)에 필요해지면 금감원 일괄 파일로 채운다
