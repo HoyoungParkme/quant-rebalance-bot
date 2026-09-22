@@ -21,10 +21,10 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 | 항목 | 내용 |
 |---|---|
 | 근거 | [[QBOT-INFRA-001]] · [[QBOT-DOM-002]] 1장 · [[QBOT-DOM-003]] |
-| 구현 | 폴더 구조 · `pyproject.toml`(uv) · Settings · Clock · PointInTime · SQLAlchemy 모델 20개 · Alembic 초기 마이그레이션 · `.env.example` · gitleaks 커밋 훅 · ruff · `docs/research/`에 검증 자료 이동 |
-| 테스트 | 마이그레이션이 빈 DB에 적용된다. 필수 환경 변수가 없으면 시작이 거부된다. PointInTime.filings_before |
+| 구현 | 폴더 구조 · `pyproject.toml`(uv) · Settings · Clock · PointInTime · SQLAlchemy 모델 22개 · Alembic 초기 마이그레이션 · `.env.example` · 비밀값 커밋 훅(gitleaks 있으면 그것, 없으면 내장 패턴) · ruff · `docs/research/`에 검증 자료 이동 |
+| 테스트 | 마이그레이션이 빈 DB에 적용된다. 필수 환경 변수가 없으면 시작이 거부된다. PointInTime.filings_before. FrozenClock KST 변환 |
 | 선행 | 없음 |
-| 완료 | — |
+| 완료 | main `4665f56` (2026-09-22). 리뷰 반영: created_at을 KST ISO 문자열로, FrozenClock이 어떤 시간대든 KST로 변환, alembic이 `~/.qbot` 생성과 MODE 반영, 훅의 40-hex 패턴 제거(커밋 해시 오탐), fill.broker_fill_no NOT NULL(SQLite NULL은 UNIQUE 중복 허용) |
 
 #### B1 시점 고정 조회
 
@@ -141,9 +141,11 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 ## 3. 커밋·PR 목록
 
-슬라이스 카드의 `완료` 행에 기록한다. 브랜치 이름은 `feat/<슬라이스>`이다.
+슬라이스 카드의 `완료` 행에 기록한다. 브랜치 이름은 `feat/<슬라이스>`이다. 머지는 main에 squash.
 
 ## 4. 미결사항
+
+되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개.
 
 - [ ] B2의 일치 테스트에 쓸 검증 입력 파일의 크기. 20개월치 패널이 약 100MB라 저장소에 넣기 어렵다. 제안은 월말 5개만 골라 넣고 나머지는 로컬에서 돌린다
 - [ ] C1에서 전 종목 일봉을 모의 계좌 한도(초당 1건)로 받으면 약 40분이 걸린다. 실전 키(초당 20건)로 수집하고 주문만 모의로 낼지. 제안은 실전 조회 키를 수집에 쓴다. 조회는 돈이 움직이지 않는다
