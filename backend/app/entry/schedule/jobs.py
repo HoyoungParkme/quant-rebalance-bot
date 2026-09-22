@@ -144,12 +144,14 @@ class Jobs:
         out_dir = db.parent / "backup"
         out_dir.mkdir(parents=True, exist_ok=True)
         target = out_dir / f"{db.stem}-{self._today().isoformat()}.sqlite3"
-        src = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        dst = sqlite3.connect(target)
-        with dst:  # WAL이라 파일 복사는 반쪽이 될 수 있다. SQLite 백업 API를 쓴다
-            src.backup(dst)
-        src.close()
-        dst.close()
+        target.unlink(missing_ok=True)  # VACUUM INTO는 있는 파일에 쓰지 않는다
+        # 파일 복사는 WAL에서 반쪽이 될 수 있고, 백업 API(backup)는 적재가 쓰는 중이면
+        # 복사를 계속 다시 시작한다. VACUUM INTO는 읽기 스냅숏 하나로 끝낸다
+        src = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
+        try:
+            src.execute("VACUUM INTO ?", (str(target),))
+        finally:
+            src.close()
         cutoff = (self._today() - timedelta(days=BACKUP_KEEP_DAYS)).isoformat()
         for old in sorted(out_dir.glob(f"{db.stem}-*.sqlite3")):
             if old.stem[len(db.stem) + 1 :] < cutoff:  # 파일 이름 뒤가 날짜다
