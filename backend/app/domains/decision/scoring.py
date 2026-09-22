@@ -87,18 +87,12 @@ def score_from_factors(factors: pd.DataFrame, cfg: ScoringConfig) -> pd.DataFram
     out["total"] = total
     out = out.sort_values("total", ascending=False, kind="mergesort")
     # 동점은 종목 코드 오름차순 (QBOT-MS-001 Scorer.score 5단계)
-    out = (
-        out.reset_index()
-        .sort_values(["total", "code"], ascending=[False, True], kind="mergesort")
-        .set_index("code")
-    )
+    out = out.reset_index().sort_values(["total", "code"], ascending=[False, True], kind="mergesort").set_index("code")
     out["rank"] = np.arange(1, len(out) + 1)
     return out
 
 
-def score(
-    bars: dict[str, pd.DataFrame], fin: pd.DataFrame, shares: pd.Series, cfg: ScoringConfig
-) -> pd.DataFrame:
+def score(bars: dict[str, pd.DataFrame], fin: pd.DataFrame, shares: pd.Series, cfg: ScoringConfig) -> pd.DataFrame:
     """QBOT-MS-001 Scorer.score."""
     return score_from_factors(apply_universe(compute_factors(bars, fin, shares), cfg), cfg)
 

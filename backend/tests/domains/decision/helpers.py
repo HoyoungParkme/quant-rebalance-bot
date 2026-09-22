@@ -15,9 +15,7 @@ def seed_market(session, n: int = 15, asof: str = "2025-05-30", seed: int = 0, i
     for k in range(n):
         code = f"{k + 1:06d}"
         codes.append(code)
-        inst = Instrument(
-            code=code, name=f"회사{k}", market="KOSPI", kind="common", shares_outstanding=10_000_000
-        )
+        inst = Instrument(code=code, name=f"회사{k}", market="KOSPI", kind="common", shares_outstanding=10_000_000)
         session.add(inst)
         session.flush()
         px = 10_000 + (k + 1) * 1000 + rng.normal(0, 100, len(dates)).cumsum()

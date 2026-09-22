@@ -22,9 +22,7 @@ from app.domains.decision.crud import DecisionCrud
 from app.domains.decision.models import Decision, Score, StrategyConfig
 from app.domains.marketdata.service import MarketDataService
 
-RESEARCH_TOP60 = (
-    Path(__file__).resolve().parents[4] / "docs" / "research" / "05-paper-run-1m" / "top60_by_month.csv"
-)
+RESEARCH_TOP60 = Path(__file__).resolve().parents[4] / "docs" / "research" / "05-paper-run-1m" / "top60_by_month.csv"
 DEFAULT_FACTORS = {"EP": 1, "SP": 1, "ROE": 1, "OPG": 1, "OPG_Q": 1, "VOL60": -1, "TURN20": -1}
 EXCLUDING_STATUSES = {"managed", "warning", "danger", "halted", "liquidation"}
 
@@ -165,9 +163,7 @@ class DecisionService:
             self.notifier("order", text)
         return d
 
-    def replay(
-        self, asof: date, compare_to: str = "stored", portfolio: Portfolio | None = None
-    ) -> ReplayResult:
+    def replay(self, asof: date, compare_to: str = "stored", portfolio: Portfolio | None = None) -> ReplayResult:
         """QBOT-MS-001 DecisionService.replay. 주문·알림 없음. status=replay로 저장."""
         pit = PointInTime(asof)
         cfg = self.crud.config_effective(asof.isoformat())

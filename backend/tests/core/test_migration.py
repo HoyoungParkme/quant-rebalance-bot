@@ -18,9 +18,7 @@ def test_upgrade_head_on_empty_db(tmp_path):
         text=True,
     )
     assert r.returncode == 0, r.stderr
-    names = {
-        row[0] for row in sqlite3.connect(db).execute("select name from sqlite_master where type='table'")
-    }
+    names = {row[0] for row in sqlite3.connect(db).execute("select name from sqlite_master where type='table'")}
     for t in [
         "instrument",
         "daily_bar",
@@ -37,9 +35,5 @@ def test_upgrade_head_on_empty_db(tmp_path):
         "command",
     ]:
         assert t in names
-    idx = (
-        sqlite3.connect(db)
-        .execute("select sql from sqlite_master where name='uq_decision_real'")
-        .fetchone()[0]
-    )
+    idx = sqlite3.connect(db).execute("select sql from sqlite_master where name='uq_decision_real'").fetchone()[0]
     assert "WHERE status != 'replay'" in idx

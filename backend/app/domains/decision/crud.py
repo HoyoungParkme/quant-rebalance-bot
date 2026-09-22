@@ -28,9 +28,7 @@ class DecisionCrud:
         return cfg
 
     def real_decision(self, asof: str, mode: str) -> Decision | None:
-        stmt = select(Decision).where(
-            Decision.asof == asof, Decision.mode == mode, Decision.status != "replay"
-        )
+        stmt = select(Decision).where(Decision.asof == asof, Decision.mode == mode, Decision.status != "replay")
         return self.s.scalar(stmt)
 
     def add_decision(self, d: Decision, scores: list[Score]) -> Decision:
@@ -64,9 +62,5 @@ class DecisionCrud:
         return {i.code: i.id for i in self.s.scalars(select(Instrument))}
 
     def pending(self) -> list[Decision]:
-        stmt = (
-            select(Decision)
-            .where(Decision.status.in_(["pending", "running", "partial"]))
-            .order_by(Decision.asof)
-        )
+        stmt = select(Decision).where(Decision.status.in_(["pending", "running", "partial"])).order_by(Decision.asof)
         return list(self.s.scalars(stmt))

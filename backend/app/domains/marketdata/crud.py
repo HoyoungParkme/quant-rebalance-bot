@@ -81,3 +81,119 @@ class MarketDataCrud:
 
     def has_bars_on(self, day: str) -> bool:
         return self.s.scalar(select(func.count()).select_from(DailyBar).where(DailyBar.trade_date == day)) > 0
+
+    # ----- 수집·적재 (추가만 한다. INFRA C10) -----
+    def instrument_by_code(self) -> dict[str, Instrument]:
+        return {i.code: i for i in self.instruments()}
+
+    def add_instrument(self, i: Instrument) -> Instrument:
+        self.s.add(i)
+        self.s.flush()
+        return i
+
+    def open_statuses(self, instrument_id: int) -> list[InstrumentStatus]:
+        stmt = select(InstrumentStatus).where(
+            InstrumentStatus.instrument_id == instrument_id, InstrumentStatus.ends_on.is_(None)
+        )
+        return list(self.s.scalars(stmt))
+
+    def add_status(self, st: InstrumentStatus) -> None:
+        self.s.add(st)
+
+    def last_bar(self, instrument_id: int) -> DailyBar | None:
+        stmt = (
+            select(DailyBar)
+            .where(DailyBar.instrument_id == instrument_id)
+            .order_by(DailyBar.series_no.desc(), DailyBar.trade_date.desc())
+            .limit(1)
+        )
+        return self.s.scalar(stmt)
+
+    def bar_on(self, instrument_id: int, trade_date: str, series_no: int) -> DailyBar | None:
+        stmt = select(DailyBar).where(
+            DailyBar.instrument_id == instrument_id,
+            DailyBar.trade_date == trade_date,
+            DailyBar.series_no == series_no,
+        )
+        return self.s.scalar(stmt)
+
+    def existing_bar_dates(self, instrument_id: int, series_no: int) -> set[str]:
+        stmt = select(DailyBar.trade_date).where(
+            DailyBar.instrument_id == instrument_id, DailyBar.series_no == series_no
+        )
+        return set(self.s.scalars(stmt))
+
+    def add_bars(self, bars: list[DailyBar]) -> None:
+        self.s.add_all(bars)
+
+    def filing_by_rcept(self, rcept_no: str) -> Filing | None:
+        return self.s.scalar(select(Filing).where(Filing.rcept_no == rcept_no))
+
+    def add_filing(self, f: Filing) -> Filing:
+        self.s.add(f)
+        self.s.flush()
+        return f
+
+    def add_snapshot(self, snap: FinancialSnapshot) -> None:
+        self.s.add(snap)
+
+    def snapshot_exists(self, filing_id: int, period_end: str, period_kind: str, consolidated: int) -> bool:
+        stmt = (
+            select(func.count())
+            .select_from(FinancialSnapshot)
+            .where(
+                FinancialSnapshot.filing_id == filing_id,
+                FinancialSnapshot.period_end == period_end,
+                FinancialSnapshot.period_kind == period_kind,
+                FinancialSnapshot.consolidated == consolidated,
+            )
+        )
+        return self.s.scalar(stmt) > 0
+
+    def cumulative_q3_op(self, instrument_id: int, year: str, consolidated: int) -> int | None:
+        """3분기 보고서의 누적 영업이익. 4분기 = 연간 - 이것."""
+        from app.domains.marketdata.models import FinancialSnapshot as FS
+
+        stmt = (
+            select(FS.operating_income)
+            .where(
+                FS.instrument_id == instrument_id,
+                FS.period_end == f"{year}-09-30",
+                FS.period_kind == "cum3q",
+                FS.consolidated == consolidated,
+            )
+            .order_by(FS.id.desc())
+            .limit(1)
+        )
+        return self.s.scalar(stmt)
+
+    def upsert_calendar(self, day: str, is_trading: bool, is_month_end: bool | None) -> None:
+        """is_month_end가 None이면 기존 값을 그대로 둔다 (잘린 달)."""
+        from app.domains.marketdata.models import TradingCalendar
+
+        row = self.s.scalar(select(TradingCalendar).where(TradingCalendar.date == day))
+        if row is None:
+            self.s.add(TradingCalendar(date=day, is_trading_day=int(is_trading), is_month_end=int(bool(is_month_end))))
+        else:
+            row.is_trading_day = int(is_trading)
+            if is_month_end is not None:
+                row.is_month_end = int(is_month_end)
+
+    def calendar_between(self, frm: str, to: str) -> list[str]:
+        from app.domains.marketdata.models import TradingCalendar
+
+        stmt = (
+            select(TradingCalendar.date)
+            .where(TradingCalendar.date >= frm, TradingCalendar.date <= to, TradingCalendar.is_trading_day == 1)
+            .order_by(TradingCalendar.date)
+        )
+        return list(self.s.scalars(stmt))
+
+    def upsert_index(self, index_name: str, day: str, close: float) -> None:
+        from app.domains.marketdata.models import IndexLevel
+
+        row = self.s.scalar(select(IndexLevel).where(IndexLevel.index_name == index_name, IndexLevel.date == day))
+        if row is None:
+            self.s.add(IndexLevel(index_name=index_name, date=day, close=close))
+        else:
+            row.close = close

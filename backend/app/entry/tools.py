@@ -81,3 +81,19 @@ REPLAY_SCHEMA = {
     "required": ["asof"],
     "additionalProperties": False,
 }
+
+BACKFILL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "from": {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}$"},
+        "sources": {"type": "string", "description": "쉼표로 구분: bars,filings,status,calendar,index"},
+        "research_prices_dir": {"type": "string"},
+    },
+    "required": ["from"],
+    "additionalProperties": False,
+}
+INSTALL_SCHEMA = {
+    "type": "object",
+    "properties": {"register_autostart": {"type": "boolean", "default": False}},
+    "additionalProperties": False,
+}

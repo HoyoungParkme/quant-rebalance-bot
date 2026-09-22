@@ -189,9 +189,7 @@ def test_bars_use_series_as_of_and_lookback(session):
 
 def test_statuses_on(session):
     i = inst(session, "000007")
-    session.add(
-        InstrumentStatus(instrument_id=i.id, status="managed", starts_on="2025-05-01", ends_on="2025-05-29")
-    )
+    session.add(InstrumentStatus(instrument_id=i.id, status="managed", starts_on="2025-05-01", ends_on="2025-05-29"))
     session.add(InstrumentStatus(instrument_id=i.id, status="halted", starts_on="2025-05-30", ends_on=None))
     session.flush()
     svc = MarketDataService(session)
@@ -222,9 +220,7 @@ def test_matches_research_selection_logic(session):
     fs["avail"] = pd.to_datetime(fs.avail)
     fs["fy_end"] = pd.to_datetime(fs.fy_end)
     fs = fs.sort_values(["code", "fy_end"])
-    expect = (
-        fs[fs.avail <= asof].drop_duplicates("code", keep="last").set_index("code")
-    )  # 검증 스크립트와 같은 로직
+    expect = fs[fs.avail <= asof].drop_duplicates("code", keep="last").set_index("code")  # 검증 스크립트와 같은 로직
     expect = expect[(asof - expect.fy_end).dt.days <= 500]
     got = MarketDataService(session).financials(PointInTime(asof.date()))
     assert set(got.index) == set(expect.index)

@@ -5,13 +5,18 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from app.core.clock import Clock
+from app.core.errors import BrokerUnavailable, Precondition
 from app.core.pit import PointInTime
+from app.domains.marketdata.collect import Collector, CollectResult
 from app.domains.marketdata.crud import MarketDataCrud
 
 MAX_FIN_AGE_DAYS = 500
@@ -37,8 +42,105 @@ def _prev_year_period_end(period_end: str) -> str:
 
 
 class MarketDataService:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self, session: Session, broker=None, filings=None, clock: Clock | None = None, held_codes_fn=None
+    ) -> None:
         self.crud = MarketDataCrud(session)
+        self.broker, self.filings, self.clock = broker, filings, clock or Clock()
+        self.held_codes_fn = held_codes_fn or (lambda: set())
+
+    # ----- 수집·적재 (QBOT-MS-001 collect_daily, QBOT-API-001 backfill) -----
+    def _collector(self) -> Collector:
+        if self.broker is None or self.filings is None:
+            raise Precondition("증권사·전자공시 접속이 설정되지 않았다")
+        return Collector(self.crud, self.broker, self.filings, self.clock, self.held_codes_fn())
+
+    def collect_daily(self, d: date) -> CollectResult:
+        """거래일 저녁 수집. 실패한 종목은 결과에 담고 계속한다 (UC-A1)."""
+        day = d.isoformat()
+        col = self._collector()
+        now_iso = self.clock.now().isoformat(timespec="seconds")
+        res = CollectResult()
+        if not self.crud.calendar_between(day, day):
+            col.collect_calendar(day, (d + timedelta(days=45)).isoformat())
+            if not self.crud.calendar_between(day, day):
+                res.skipped = True
+                return res
+        try:
+            res.instruments_added, res.status_changes = col.sync_instruments(day)
+            for inst in self.crud.instruments():
+                if inst.delisted_on is not None:
+                    continue
+                last = self.crud.last_bar(inst.id)
+                # 마지막 저장일부터(그날 포함: 수정주가 판 감지). 오래 멈췄어도 빈 구간 없이 채운다
+                frm = last.trade_date if last else (d - timedelta(days=10)).isoformat()
+                try:
+                    n, bumped = col.collect_bars(inst, frm, day, now_iso)
+                except Exception as e:  # noqa: BLE001 - 한 종목 실패가 전체를 멈추면 안 된다
+                    res.bars_failed.append(f"{inst.code}: {e}")
+                    continue
+                res.bars_ok += n
+                if bumped:
+                    res.series_bumped.append(inst.code)
+            col.collect_index((d - timedelta(days=30)).isoformat(), day)
+            # 공시는 전자공시 반영이 며칠 늦을 수 있어 2주를 다시 훑는다. 이미 넣은 것은 건너뛴다
+            res.filings_added, res.alerts = col.collect_filings((d - timedelta(days=14)).isoformat(), day, now_iso)
+        finally:
+            self.crud.s.commit()  # 도중에 실패해도 받은 만큼 남긴다
+        return res
+
+    def backfill(self, frm: date, sources: list[str], research_dir: Path | None = None, progress=None) -> dict:
+        """과거 적재. 끊기면 다시 실행해 이어 받는다 (UC-H5)."""
+        col = self._collector()
+        today = self.clock.today()
+        now_iso = self.clock.now().isoformat(timespec="seconds")
+        out: dict[str, int | list[str]] = {}
+        if "calendar" in sources:
+            out["calendar"] = col.collect_calendar(frm.isoformat(), (today + timedelta(days=45)).isoformat())
+        if "status" in sources or "bars" in sources:
+            out["instruments_added"], out["status_changes"] = col.sync_instruments(today.isoformat())
+        if "index" in sources:
+            out["index"] = col.collect_index(frm.isoformat(), today.isoformat())
+        self.crud.s.commit()
+        if "bars" in sources:
+            ok, failed = 0, []
+            live = [i for i in self.crud.instruments() if i.delisted_on is None]
+            # 조회는 지연 시간이 길어 4개 스레드로 받고, DB 쓰기는 주 스레드에서 한다 (세션은 스레드 안전하지 않다)
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for k in range(0, len(live), 40):
+                    batch = live[k : k + 40]
+                    futs = {pool.submit(col.fetch_bars, i, frm.isoformat(), today.isoformat()): i for i in batch}
+                    for fut, inst in futs.items():
+                        try:
+                            n, _ = col.store_bars(inst, fut.result(), today.isoformat(), now_iso)
+                            ok += n
+                        except Exception as e:  # noqa: BLE001
+                            failed.append(f"{inst.code}: {e}")
+                    self.crud.s.commit()  # 끊겨도 받은 만큼 남는다
+                    if progress:
+                        progress(f"일봉 {min(k + 40, len(live))}/{len(live)}종목, {ok}행")
+            out["bars"], out["bars_failed"] = ok, failed
+            if research_dir:
+                out["research_bars"] = col.load_research_prices(research_dir, now_iso)
+            self.crud.s.commit()
+        if "filings" in sources:
+            n_total = 0
+            cur = frm
+            while cur <= today:
+                nxt = min(cur + timedelta(days=30), today)
+                try:
+                    n, _ = col.collect_filings(cur.isoformat(), nxt.isoformat(), now_iso)
+                except BrokerUnavailable as e:  # 전자공시 일일 한도. 내일 다시 실행하면 이어진다
+                    out["filings_stopped"] = f"{cur}: {e}"
+                    break
+                n_total += n
+                self.crud.s.commit()
+                if progress:
+                    progress(f"공시 {nxt}까지 {n_total}건")
+                cur = nxt + timedelta(days=1)
+            out["filings"] = n_total
+        self.crud.s.commit()
+        return out
 
     def financials(self, pit: PointInTime) -> pd.DataFrame:
         """QBOT-MS-001 MarketDataService.financials. 종목 코드 인덱스, FIN_COLUMNS."""

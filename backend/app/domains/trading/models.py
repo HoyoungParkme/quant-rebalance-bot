@@ -36,9 +36,7 @@ class Fill(IdCreated, Base):
     fee: Mapped[int] = mapped_column(Integer, nullable=False)
     tax: Mapped[int] = mapped_column(Integer, nullable=False)
     filled_at: Mapped[str] = mapped_column(String(25), nullable=False)
-    broker_fill_no: Mapped[str] = mapped_column(
-        String(40), nullable=False
-    )  # 없으면 실행기가 합성 키를 넣는다
+    broker_fill_no: Mapped[str] = mapped_column(String(40), nullable=False)  # 없으면 실행기가 합성 키를 넣는다
 
 
 class Position(IdCreated, Base):

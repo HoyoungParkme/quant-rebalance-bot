@@ -90,9 +90,7 @@ def test_excluded_status_is_skipped(session):
     ids = DecisionCrud(session).instrument_ids()
     svc = make(session)
     first = svc.replay(ASOF, "none").picked[0]
-    session.add(
-        InstrumentStatus(instrument_id=ids[first], status="managed", starts_on="2025-05-01", ends_on=None)
-    )
+    session.add(InstrumentStatus(instrument_id=ids[first], status="managed", starts_on="2025-05-01", ends_on=None))
     session.flush()
     d = svc.decide_month_end(ASOF, "paper")
     assert first not in DecisionCrud(session).picks(d.id)

@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     daily_order_cap_multiple: float = 2.0
 
     @property
+    def cache_dir(self) -> Path:
+        return self.data_dir / "cache"
+
+    @property
     def db_path(self) -> Path:
         return self.data_dir / f"qbot-{self.mode}.sqlite3"
 
@@ -58,6 +62,25 @@ class Settings(BaseSettings):
         if self.mode == "live":
             return "https://openapi.koreainvestment.com:9443"
         return "https://openapivts.koreainvestment.com:29443"
+
+    def query_credentials(self) -> tuple[str, str, str, float]:
+        """조회용 접속. 실전 키가 있으면 그것(초당 20건), 없으면 모의(초당 1건). 조회는 돈이 움직이지 않는다.
+
+        (QBOT-CODE-001 미결 결정: 수집은 실전 조회 키로, 주문은 모드에 따라)
+        """
+        if self.kis_live_app_key and self.kis_live_app_secret:
+            return (
+                "https://openapi.koreainvestment.com:9443",
+                self.kis_live_app_key,
+                self.kis_live_app_secret,
+                15.0,
+            )
+        return (
+            "https://openapivts.koreainvestment.com:29443",
+            self.kis_paper_app_key,
+            self.kis_paper_app_secret,
+            0.9,
+        )
 
     def live_ready(self) -> bool:
         """실전 접속 정보가 모두 있는가. 관문(UC-H2)이 확인한다."""
