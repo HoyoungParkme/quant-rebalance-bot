@@ -42,11 +42,11 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 | 항목 | 내용 |
 |---|---|
 | 근거 | [[QBOT-SCN-001#S2]] · [[QBOT-UC-001#UC-S2]] |
-| 구현 함수 | [[QBOT-MS-001#Scorer.score]] · [[QBOT-MS-001#Scorer.select]] |
+| 구현 함수 | [[QBOT-MS-001#Scorer.score]] · [[QBOT-MS-001#Scorer.select]] · compute_factors · apply_universe · score_from_factors |
 | API | — |
-| 테스트 | 검증 자료 `05-모의운용/scripts/simulate.py`와 같은 입력으로 20개월 전부 선정 종목 100% 일치. 같은 입력 두 번 → 바이트 동일 |
+| 테스트 | 검증 패널 표본(월말 5개, `tests/fixtures/research_panel_sample.csv`)으로 점수·상위 60 순서·선정이 검증 `simulate.py`의 식과 100% 일치. 21개월 전체는 로컬 파일을 `QBOT_RESEARCH_PANEL`로 주면 돈다(통과 확인). 같은 입력 두 번 → 바이트 동일. 지표 식은 `build_panel.py`와 직접 비교 |
 | 선행 | B1 |
-| 완료 | — |
+| 완료 | main `d2395d8` (2026-09-22). 테스트 8개. 작성 중 발견 2건: 지표가 하나라도 없는 종목을 백분위 계산 **전에** 빼야 분모가 같다. 동점 순서는 검증 코드가 정렬 알고리즘에 따라 임의였고(한 월말에 동점 75쌍) 봇은 명세대로 코드 순. 리뷰 반영: 0원 종가를 이전 값으로 마스킹(검증과 동일), 거래대금 NaN을 20일 평균 분모에서 제외, 결과 인덱스 이름을 `code`로 고정, 빈 일봉은 DataNotReady |
 
 #### B3 월말 판단과 재현
 
@@ -145,8 +145,8 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 ## 4. 미결사항
 
-되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일.
+되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일. [[QBOT-MS-001#Scorer.score]] 1~2단계: `OPG_Q`의 절단 범위는 [-1, 5]가 아니라 [-3, 5]이고 임계값은 `|op_q_prev| >= 1억`, `OPG`는 `op_annual_prev > 0`일 때만 (검증 quarterly.py·build_panel.py 기준). 같은 함수 3단계 뒤에 "이 제외를 백분위 계산 전에 한다"를 명시.
 
-- [ ] B2의 일치 테스트에 쓸 검증 입력 파일의 크기. 20개월치 패널이 약 100MB라 저장소에 넣기 어렵다. 제안은 월말 5개만 골라 넣고 나머지는 로컬에서 돌린다
+- [x] B2의 일치 테스트 입력 크기 → 월말 5개 표본(689KB)을 저장소에, 21개월 전체는 로컬 환경 변수 `QBOT_RESEARCH_PANEL`
 - [ ] C1에서 전 종목 일봉을 모의 계좌 한도(초당 1건)로 받으면 약 40분이 걸린다. 실전 키(초당 20건)로 수집하고 주문만 모의로 낼지. 제안은 실전 조회 키를 수집에 쓴다. 조회는 돈이 움직이지 않는다
 - [ ] D1의 실제 주문 테스트를 모의 계좌 어느 종목으로 할지. 제안은 거래량 많은 대형주 1주
