@@ -1,0 +1,19 @@
+# 비밀값·데이터는 저장소 밖(~/.qbot)이지만 실수 방지
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# 파이썬
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# 로컬
+.claude/WORKLOG.md
+.playwright-mcp/
