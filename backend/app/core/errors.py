@@ -14,7 +14,11 @@ class BrokerUnavailable(QbotError):
 
 
 class BrokerSendFailed(QbotError):
-    """주문 전송 호출이 실패했다. 주문 상태는 unknown이다."""
+    """주문 전송 호출이 실패했다. 증권사에 닿았는지 알 수 없다. 주문 상태는 unknown이다."""
+
+
+class BrokerRejected(QbotError):
+    """증권사가 주문을 거부했다(잔고 부족, 장 시간 아님 등). 확실히 체결되지 않았다."""
 
 
 class OrdersBlocked(QbotError):

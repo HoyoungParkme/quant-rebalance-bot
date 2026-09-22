@@ -82,6 +82,31 @@ class Settings(BaseSettings):
             0.9,
         )
 
+    def order_credentials(self) -> tuple[str, str, str, str, str, float]:
+        """주문용 접속. 조회와 달리 모드 그대로 쓴다. 모의 모드면 모의 계좌로만 주문이 나간다.
+
+        (접속 주소, 앱 키, 앱 시크릿, 계좌 8자리, 상품 코드, 초당 호출 한도)
+        """
+        if self.mode == "live":
+            if not self.live_ready():
+                raise ValueError("실전 모드인데 실전 접속 정보(키·시크릿·계좌 8자리)가 없다")
+            return (
+                "https://openapi.koreainvestment.com:9443",
+                self.kis_live_app_key,
+                self.kis_live_app_secret,
+                self.kis_live_account,
+                self.kis_live_product,
+                15.0,
+            )
+        return (
+            "https://openapivts.koreainvestment.com:29443",
+            self.kis_paper_app_key,
+            self.kis_paper_app_secret,
+            self.kis_paper_account,
+            self.kis_paper_product,
+            0.9,
+        )
+
     def live_ready(self) -> bool:
         """실전 접속 정보가 모두 있는가. 관문(UC-H2)이 확인한다."""
         return all([self.kis_live_app_key, self.kis_live_app_secret, len(self.kis_live_account) == 8])

@@ -51,3 +51,37 @@ def test_dart_filings_and_financials(app):
 
 def test_telegram_send(app):
     assert app.ops.notifier.send("[모의] C2 연기 테스트: 알림 경로 확인") is True
+
+
+def test_kis_balance_and_orders_today(app):
+    """주문용 접속(모드 키)이 열리는지. 돈은 움직이지 않는다."""
+    b = app.trading.balance()
+    assert b.cash >= 0 and b.total_equity >= b.cash - 1
+    assert isinstance(app.trading.broker.orders_today(), list)
+
+
+@pytest.mark.skipif(os.environ.get("QBOT_LIVE_ORDER") != "1", reason="실제 주문은 QBOT_LIVE_ORDER=1")
+def test_paper_order_roundtrip(app):
+    """모의 계좌에 1주 매수 → 체결 확인 → 미체결이면 취소, 체결이면 1주 매도 (QBOT-CODE-001 D1).
+
+    DB를 건드리지 않고 어댑터만 쓴다. 실행기의 상태 전이는 단위 테스트가 본다.
+    """
+    from app.core.errors import BrokerRejected
+    from app.domains.trading.ports import OrderRequest
+
+    assert app.settings.mode == "paper", "실전 계좌로는 이 테스트를 돌리지 않는다"
+    code = "005930"
+    try:
+        no = app.trading.broker.place_order(OrderRequest(code, "buy", 1, 0))
+    except BrokerRejected as e:
+        # 여기까지 왔다는 건 거래 ID·계좌·해시키·본문이 다 통과했다는 뜻이다. 남은 건 장 시간뿐
+        if any(k in str(e) for k in ("장종료", "장시작", "주문시간", "휴장")):
+            pytest.skip(f"장 시간이 아니다(요청 자체는 통과): {e}")
+        raise
+    assert no
+    st = app.trading.broker.order_status(no)
+    assert st is not None and st.code == code and st.side == "buy" and st.qty == 1
+    if st.filled_qty >= 1:
+        app.trading.broker.place_order(OrderRequest(code, "sell", 1, 0))
+    else:
+        app.trading.broker.cancel_order(no)

@@ -20,7 +20,9 @@ from app.domains.marketdata.adapters.kis import KisAdapter
 from app.domains.marketdata.service import MarketDataService
 from app.domains.ops.adapters.telegram import TelegramAdapter
 from app.domains.ops.service import Masker, OpsService
-from app.domains.risk.service import RiskService
+from app.domains.risk.service import OrderGate, RiskService
+from app.domains.trading.adapters.kis import KisOrderAdapter
+from app.domains.trading.service import TradingService
 from app.entry.telegram.poller import TelegramPoller
 from app.entry.tools import (
     BACKFILL_SCHEMA,
@@ -60,6 +62,7 @@ class App:
     decision: DecisionService
     ops: OpsService
     risk: RiskService
+    trading: TradingService
     tools: ToolRegistry
     poller: TelegramPoller
 
@@ -78,6 +81,16 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         token_cache=settings.cache_dir / f"kis-token-{'live' if 'openapi.' in base else 'paper'}.json",
     )
     broker = KisAdapter(kis)
+    # 주문은 조회와 다른 키를 쓴다. 모의 모드면 모의 계좌로만 나간다 (QBOT-INFRA-001 C6)
+    obase, okey, osecret, oacct, oprod, orate = settings.order_credentials()
+    order_kis = KisClient(
+        obase,
+        okey,
+        osecret,
+        rate_per_sec=orate,
+        token_cache=settings.cache_dir / f"kis-token-{'live' if 'openapi.' in obase else 'paper'}.json",
+    )
+    order_broker = KisOrderAdapter(order_kis, oacct, oprod, settings.mode, clock)
     filings = DartAdapter(DartClient(settings.dart_api_key, corp_cache=settings.cache_dir / "dart-corp.json"))
     md = MarketDataService(session, broker=broker, filings=filings, clock=clock)
 
@@ -97,7 +110,14 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
             settings.telegram_bot_token,
         ]
     )
-    risk = RiskService(session, clock, settings.mode)
+    trading = TradingService(
+        session,
+        order_broker,
+        OrderGate(session, settings.max_position_weight, settings.daily_order_cap_multiple),
+        clock,
+        md.instrument_ids,
+    )
+    risk = RiskService(session, clock, settings.mode, cancel_open_orders=trading.cancel_open)
     notifier = TelegramAdapter(TelegramClient(settings.telegram_bot_token), settings.telegram_chat_id)
     ops = OpsService(
         session,
@@ -149,6 +169,11 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         except Exception as e:  # noqa: BLE001
             lines.append(f"증권사 접속: 실패 {e}")
         try:
+            b = trading.balance()
+            lines.append(f"주문 계좌({settings.mode}): OK 예수금 {b.cash:,}원, 보유 {len(b.holdings)}종목")
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"주문 계좌({settings.mode}): 실패 {e}")
+        try:
             n = len(filings.c.corp_codes())
             lines.append(f"전자공시 접속: OK (회사 코드 {n}개)")
         except Exception as e:  # noqa: BLE001
@@ -193,4 +218,4 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
     tools.add(ToolSpec("backfill", BACKFILL_SCHEMA, backfill_handler, cli_only=True))
     tools.add(ToolSpec("install", INSTALL_SCHEMA, install_handler, cli_only=True))
     poller = TelegramPoller(notifier, tools, clock, settings.telegram_chat_id, on_error=session.rollback)
-    return App(settings, session, clock, md, decision, ops, risk, tools, poller)
+    return App(settings, session, clock, md, decision, ops, risk, trading, tools, poller)

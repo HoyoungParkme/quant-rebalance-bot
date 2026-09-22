@@ -245,6 +245,10 @@ class MarketDataService:
     def has_bars_on(self, pit: PointInTime) -> bool:
         return self.crud.has_bars_on(pit.asof.isoformat())
 
+    def instrument_ids(self) -> dict[str, int]:
+        """종목 코드 → 내부 id. 매매 도메인이 주문 행을 만들 때 쓴다."""
+        return {c: i.id for c, i in self.crud.instrument_by_code().items()}
+
     def shares(self) -> pd.Series:
         return pd.Series({i.code: i.shares_outstanding for i in self.crud.instruments()}, dtype="float64")
 

@@ -1,13 +1,54 @@
-"""위험 관리 서비스 (QBOT-DOM-002 RiskService). 슬라이스 C2에서는 정지·재개·상태만. 한도·관문은 E·F에서."""
+"""위험 관리 서비스와 주문 관문 (QBOT-DOM-002 RiskService·OrderGate). 손실 한도·실전 관문은 슬라이스 E·F."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from app.core.clock import Clock
 from app.core.errors import Precondition
 from app.domains.risk.crud import RiskCrud
 from app.domains.risk.models import BotState
+from app.domains.trading.ports import EquitySnapshot, OrderRequest
+
+
+@dataclass(frozen=True)
+class GateVerdict:
+    allowed: bool
+    reason: str | None = None
+
+
+class OrderGate:
+    """주문 하나가 나가도 되는지 판정한다 (QBOT-MS-001 OrderGate.check). 판정할 수 없으면 거부다."""
+
+    def __init__(self, session, max_position_weight: float = 0.15, daily_order_cap_multiple: float = 2.0) -> None:
+        self.crud = RiskCrud(session)
+        self.max_position_weight = max_position_weight
+        self.daily_order_cap_multiple = daily_order_cap_multiple
+
+    def check(self, req: OrderRequest, snap: EquitySnapshot) -> GateVerdict:
+        s = self.crud.state_or_none()
+        if s is None:
+            return GateVerdict(False, "no_state")
+        if s.halted:
+            return GateVerdict(False, "halted")
+        if s.orders_blocked:
+            return GateVerdict(False, "reconcile")
+        if s.mode == "live" and s.gate_record_id is None:
+            return GateVerdict(False, "no_gate")
+        amount = req.qty * req.price
+        if req.side == "buy":
+            if s.buy_suspended:
+                return GateVerdict(False, "drawdown")
+            if snap.total <= 0:
+                return GateVerdict(False, "no_equity")
+            if (snap.holdings.get(req.code, 0) + amount) / snap.total > self.max_position_weight:
+                return GateVerdict(False, "concentration")
+        if snap.today_order_amount + amount > snap.total * self.daily_order_cap_multiple:
+            return GateVerdict(False, "daily_cap")
+        if req.side == "buy" and s.first_month_cap is not None and snap.month_buy_amount + amount > s.first_month_cap:
+            return GateVerdict(False, "first_month")
+        return GateVerdict(True)
 
 
 class RiskService:
