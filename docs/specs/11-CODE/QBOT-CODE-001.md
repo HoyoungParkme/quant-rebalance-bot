@@ -53,12 +53,12 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 | 항목 | 내용 |
 |---|---|
 | 근거 | [[QBOT-SCN-001#S2]] · [[QBOT-SCN-001#S11]] · [[QBOT-SEQ-001#SEQ-2]] |
-| 구현 함수 | [[QBOT-MS-001#DecisionService.decide_month_end]] · [[QBOT-MS-001#DecisionService.replay]] · DecisionCrud · ToolRegistry · cli 입구 |
+| 구현 함수 | [[QBOT-MS-001#DecisionService.decide_month_end]] · [[QBOT-MS-001#DecisionService.replay]] · DecisionCrud · seed_default_config · ToolRegistry · cli 입구 · `app/main.py` 조립 |
 | API | [[QBOT-API-001#replay]] |
 | 화면 | — |
-| 테스트 | decide_month_end·replay의 테스트 관점. `qbot replay --asof 2025-05-30 --compare-to research_file`이 matched=True |
+| 테스트 | decide_month_end·replay의 테스트 관점을 가짜 시장 데이터(종목 15개, 일봉 260일, 연간·분기 재무)로. ToolRegistry의 인가·스키마·confirm·cli_only. 명령줄 `replay` 실행. **실제 데이터로 `qbot replay --asof 2025-05-30 --compare-to research_file`이 matched=True인지는 C1 적재 뒤 S11 통합 테스트에서** |
 | 선행 | B2 |
-| 완료 | — |
+| 완료 | main `cf34399` (2026-09-22). 테스트 15개. 평가액·지수 부분은 D2 전이라 `portfolio_fn` 주입(지금은 계획 자금 300만원), 알림은 C2 전이라 `notifier` 콜백. 검증 상위 60 순위 파일 `docs/research/05-paper-run-1m/top60_by_month.csv`(21개월) 추가. 리뷰 반영: 60위 밖에서 뽑힌 종목이 Score 저장에서 빠지던 문제(소자본에서 실제 발생) → 선정·건너뛴 행 전부 저장, 추세 필터를 검증과 같이 "있는 달만큼의 평균"으로, stored 비교 대상이 없으면 research_file로 폴백, diff 길이 오보, cli `--k=v`와 도구 앞 옵션 파싱 |
 
 #### C1 증권사·전자공시 어댑터와 수집
 
@@ -130,7 +130,7 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 | 시나리오 | 슬라이스 | 검증하는 것 |
 |---|---|---|
-| S11 과거 날짜 재현 | B3 | 2025-05~2026-08 월말 20개 전부 검증 파일과 일치 |
+| S11 과거 날짜 재현 | B3, C1 | 2025-05~2026-08 월말 20개 전부 검증 파일(`top60_by_month.csv`)과 일치. C1의 backfill 뒤에 돈다 |
 | S12 처음 설치 | A, C1, C2 | 빈 컴퓨터에서 install → backfill → replay → 자동 시작까지 |
 | S1 거래일 저녁 | C1, E | 실제 거래일에 수집·대조·평가액·요약이 순서대로 돈다 |
 | S2 + S3 월말 판단과 실행 | B3, D2 | 모의 계좌에서 판단 다음 날 10종목 매수, 다음 달 교체 |
@@ -145,7 +145,7 @@ upstream: [QBOT-MS-001, QBOT-SEQ-001, QBOT-SCN-001]
 
 ## 4. 미결사항
 
-되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일. [[QBOT-MS-001#Scorer.score]] 1~2단계: `OPG_Q`의 절단 범위는 [-1, 5]가 아니라 [-3, 5]이고 임계값은 `|op_q_prev| >= 1억`, `OPG`는 `op_annual_prev > 0`일 때만 (검증 quarterly.py·build_panel.py 기준). 같은 함수 3단계 뒤에 "이 제외를 백분위 계산 전에 한다"를 명시.
+되먹일 것: [[QBOT-DOM-003#fill]]의 `broker_fill_no`를 NOT NULL로. [[QBOT-DOM-001]] 1장의 "개념 20개"는 21개. [[QBOT-MS-001#MarketDataService.financials]] 4단계의 500일 규칙은 "최신 연간·분기 행"에만 적용하고 직전 연도 행은 남긴다고 고쳐야 한다. 같은 함수 5단계의 "전년 같은 분기"를 연간에도 "정확히 1년 전 결산기"로 통일. [[QBOT-MS-001#Scorer.score]] 1~2단계: `OPG_Q`의 절단 범위는 [-1, 5]가 아니라 [-3, 5]이고 임계값은 `|op_q_prev| >= 1억`, `OPG`는 `op_annual_prev > 0`일 때만 (검증 quarterly.py·build_panel.py 기준). 같은 함수 3단계 뒤에 "이 제외를 백분위 계산 전에 한다"를 명시. [[QBOT-MS-001#DecisionService.decide_month_end]] 9단계: "최근 10개월 월말 종가 평균"은 "있는 만큼(최대 10개)의 평균보다 높지 않으면 현금"으로(검증 simulate.py 15행). [[QBOT-MS-001#Scorer.select]] 출력의 `top60`은 "상위 60 + 선정·건너뛴 행 전부"로.
 
 - [x] B2의 일치 테스트 입력 크기 → 월말 5개 표본(689KB)을 저장소에, 21개월 전체는 로컬 환경 변수 `QBOT_RESEARCH_PANEL`
 - [ ] C1에서 전 종목 일봉을 모의 계좌 한도(초당 1건)로 받으면 약 40분이 걸린다. 실전 키(초당 20건)로 수집하고 주문만 모의로 낼지. 제안은 실전 조회 키를 수집에 쓴다. 조회는 돈이 움직이지 않는다
