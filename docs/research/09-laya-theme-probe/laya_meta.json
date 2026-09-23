@@ -1,0 +1,10 @@
+{
+ "model": "convaiinnovations/laya (multilingual subfolder, mmBERT-base)",
+ "laya_version": "0.3.6",
+ "router_choice_for_korean": "multilingual",
+ "router_reason": "non-Latin script (hangul, 95% of letters); the English checkpoint cannot read it",
+ "load_seconds": 17.9,
+ "latency_ms_median": 1075,
+ "latency_ms_p90": 1154,
+ "n_calls": 300
+}
