@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
 import shutil
 import subprocess
 import sys
@@ -15,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core import models_registry  # noqa: F401 - 모든 ORM을 등록해야 도메인 간 외래 키가 풀린다
 from app.core.clock import Clock
 from app.core.db import make_engine, make_session_factory
-from app.core.errors import QbotError
+from app.core.errors import Precondition, QbotError
 from app.core.settings import Settings, load_settings
 from app.domains.decision.crud import DecisionCrud
 from app.domains.decision.service import DecisionService, Portfolio, plan_of, seed_default_config
@@ -349,7 +351,12 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
         return f"새 전략 설정 {cfg.id}. {cfg.effective_from}부터 적용: {cfg.factors_json}"
 
     def run_handler(args: dict) -> str:
-        """상주 프로세스. 스케줄과 메신저 입구를 함께 돌린다 (QBOT-INFRA-001 C3)."""
+        """상주 프로세스. 스케줄과 메신저 입구를 함께 돌린다 (QBOT-INFRA-001 C3).
+
+        한 대만 돈다. 두 대가 뜨면 스케줄이 두 번 돌아 같은 주문이 두 번 나간다.
+        """
+        lock_file = single_instance_lock(settings)
+        _ = lock_file  # 프로세스가 사는 동안 잡고 있어야 한다
         app = built["app"]
         jobs = Jobs(app, lock=app.lock)
         jobs.run("재시작 정리", jobs.resume_after_restart, trading_only=False)
@@ -466,3 +473,22 @@ def register_autostart() -> str:
         why = out.stderr.strip()[:80]
         return f"자동 시작 등록: {path} 를 만들었다. 직접 켜야 한다 — systemctl --user enable --now qbot ({why})"
     return f"자동 시작 등록: {path} 등록됨. 로그인 없이도 돌게 하려면 loginctl enable-linger {Path.home().name}"
+
+
+def single_instance_lock(settings: Settings):
+    """같은 모드의 봇이 이미 돌고 있으면 시작을 거부한다.
+
+    감시 스크립트를 두 번 띄우거나, 옛 프로세스가 안 죽은 채 새로 띄우면 스케줄이 두 번 돈다.
+    그러면 같은 판단으로 주문이 두 번 나간다. 파일 잠금은 프로세스가 죽으면 저절로 풀린다.
+    """
+    path = settings.data_dir / f"qbot-{settings.mode}.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = path.open("w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        f.close()
+        raise Precondition(f"이미 {settings.mode} 봇이 돌고 있다 ({path}). 먼저 멈춘다") from e
+    f.write(f"{os.getpid()}\n")
+    f.flush()
+    return f
