@@ -1,0 +1,42 @@
+{
+ "baseline": {
+  "finished": "2026-09-23T16:16:29"
+ },
+ "zeroshot": {
+  "seconds": 824,
+  "n": 1585,
+  "ms_per_item": 520,
+  "finished": "2026-09-23T16:30:13"
+ },
+ "head": {
+  "encode_seconds": 1431,
+  "total_seconds": 5791,
+  "val_loss_by_epoch": [
+   0.7961,
+   0.6586,
+   0.6793,
+   0.6072,
+   0.5646,
+   0.5423
+  ],
+  "temperature": {
+   "t1": 1.0237747324710975,
+   "t2": 1.4563659151116708
+  },
+  "finished": "2026-09-23T18:06:44"
+ },
+ "partial": {
+  "total_seconds": 7733,
+  "val_loss_by_epoch": [
+   0.4095,
+   0.4588
+  ],
+  "temperature": {
+   "t1": 0.9102954531446772,
+   "t2": 1.4563659151116708
+  },
+  "top_layers": 6,
+  "epochs": 2,
+  "finished": "2026-09-23T20:15:37"
+ }
+}

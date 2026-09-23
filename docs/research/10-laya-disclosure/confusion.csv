@@ -1,0 +1,114 @@
+task,method,true,pred,n
+t1,baseline,유상증자,유상증자,29
+t1,baseline,유상증자,전환사채,3
+t1,baseline,전환사채,전환사채,2
+t1,baseline,전환사채,신주인수권부사채,39
+t1,baseline,신주인수권부사채,신주인수권부사채,15
+t1,baseline,무상증자,무상증자,23
+t1,baseline,자기주식취득,전환사채,1
+t1,baseline,자기주식취득,자기주식취득,428
+t1,baseline,자기주식처분,자기주식처분,36
+t1,baseline,기타,전환사채,8
+t1,baseline,기타,신주인수권부사채,3
+t1,baseline,기타,자기주식취득,11
+t1,baseline,기타,기타,27
+t1,zeroshot,유상증자,신주인수권부사채,28
+t1,zeroshot,유상증자,자기주식처분,3
+t1,zeroshot,유상증자,기타,1
+t1,zeroshot,전환사채,전환사채,16
+t1,zeroshot,전환사채,기타,25
+t1,zeroshot,신주인수권부사채,전환사채,2
+t1,zeroshot,신주인수권부사채,신주인수권부사채,2
+t1,zeroshot,신주인수권부사채,기타,11
+t1,zeroshot,무상증자,신주인수권부사채,11
+t1,zeroshot,무상증자,자기주식처분,1
+t1,zeroshot,무상증자,기타,11
+t1,zeroshot,자기주식취득,전환사채,1
+t1,zeroshot,자기주식취득,신주인수권부사채,10
+t1,zeroshot,자기주식취득,무상증자,1
+t1,zeroshot,자기주식취득,자기주식취득,405
+t1,zeroshot,자기주식취득,자기주식처분,10
+t1,zeroshot,자기주식취득,기타,2
+t1,zeroshot,자기주식처분,전환사채,2
+t1,zeroshot,자기주식처분,자기주식취득,12
+t1,zeroshot,자기주식처분,자기주식처분,22
+t1,zeroshot,기타,유상증자,1
+t1,zeroshot,기타,전환사채,15
+t1,zeroshot,기타,신주인수권부사채,6
+t1,zeroshot,기타,자기주식취득,14
+t1,zeroshot,기타,자기주식처분,3
+t1,zeroshot,기타,기타,10
+t1,head,유상증자,유상증자,22
+t1,head,유상증자,신주인수권부사채,3
+t1,head,유상증자,무상증자,4
+t1,head,유상증자,자기주식취득,1
+t1,head,유상증자,기타,2
+t1,head,전환사채,전환사채,40
+t1,head,전환사채,기타,1
+t1,head,신주인수권부사채,신주인수권부사채,14
+t1,head,신주인수권부사채,기타,1
+t1,head,무상증자,무상증자,14
+t1,head,무상증자,기타,9
+t1,head,자기주식취득,신주인수권부사채,1
+t1,head,자기주식취득,자기주식취득,421
+t1,head,자기주식취득,자기주식처분,5
+t1,head,자기주식취득,기타,2
+t1,head,자기주식처분,자기주식취득,4
+t1,head,자기주식처분,자기주식처분,32
+t1,head,기타,유상증자,1
+t1,head,기타,전환사채,11
+t1,head,기타,신주인수권부사채,2
+t1,head,기타,자기주식취득,9
+t1,head,기타,자기주식처분,3
+t1,head,기타,기타,23
+t1,partial,유상증자,유상증자,32
+t1,partial,전환사채,전환사채,41
+t1,partial,신주인수권부사채,신주인수권부사채,15
+t1,partial,무상증자,유상증자,8
+t1,partial,무상증자,무상증자,5
+t1,partial,무상증자,기타,10
+t1,partial,자기주식취득,자기주식취득,422
+t1,partial,자기주식취득,기타,7
+t1,partial,자기주식처분,자기주식처분,36
+t1,partial,기타,전환사채,7
+t1,partial,기타,자기주식취득,1
+t1,partial,기타,기타,41
+t2,baseline,소각,소각,110
+t2,baseline,소각,기타,1
+t2,baseline,주가안정·주주가치,소각,230
+t2,baseline,임직원 보상,소각,47
+t2,baseline,임직원 보상,임직원 보상,1
+t2,baseline,기타,소각,26
+t2,baseline,기타,기타,1
+t2,zeroshot,소각,주가안정·주주가치,107
+t2,zeroshot,소각,임직원 보상,4
+t2,zeroshot,주가안정·주주가치,주가안정·주주가치,217
+t2,zeroshot,주가안정·주주가치,임직원 보상,12
+t2,zeroshot,주가안정·주주가치,기타,1
+t2,zeroshot,임직원 보상,주가안정·주주가치,46
+t2,zeroshot,임직원 보상,임직원 보상,2
+t2,zeroshot,기타,주가안정·주주가치,25
+t2,zeroshot,기타,임직원 보상,2
+t2,head,소각,소각,5
+t2,head,소각,주가안정·주주가치,98
+t2,head,소각,임직원 보상,1
+t2,head,소각,기타,7
+t2,head,주가안정·주주가치,소각,2
+t2,head,주가안정·주주가치,주가안정·주주가치,222
+t2,head,주가안정·주주가치,임직원 보상,4
+t2,head,주가안정·주주가치,기타,2
+t2,head,임직원 보상,주가안정·주주가치,46
+t2,head,임직원 보상,임직원 보상,1
+t2,head,임직원 보상,기타,1
+t2,head,기타,소각,1
+t2,head,기타,주가안정·주주가치,20
+t2,head,기타,기타,6
+t2,partial,소각,소각,3
+t2,partial,소각,주가안정·주주가치,97
+t2,partial,소각,임직원 보상,7
+t2,partial,소각,기타,4
+t2,partial,주가안정·주주가치,주가안정·주주가치,230
+t2,partial,임직원 보상,주가안정·주주가치,48
+t2,partial,기타,주가안정·주주가치,18
+t2,partial,기타,임직원 보상,3
+t2,partial,기타,기타,6
