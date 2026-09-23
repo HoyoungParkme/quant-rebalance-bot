@@ -74,9 +74,7 @@ class MarketDataService:
             for inst in self.crud.instruments():
                 if inst.delisted_on is not None:
                     continue
-                last = self.crud.last_bar(inst.id)
-                # 마지막 저장일부터(그날 포함: 수정주가 판 감지). 오래 멈췄어도 빈 구간 없이 채운다
-                frm = last.trade_date if last else (d - timedelta(days=10)).isoformat()
+                frm = self._bars_from(inst.id, d)
                 try:
                     n, bumped = col.collect_bars(inst, frm, day, now_iso)
                 except Exception as e:  # noqa: BLE001 - 한 종목 실패가 전체를 멈추면 안 된다
@@ -121,11 +119,12 @@ class MarketDataService:
             with ThreadPoolExecutor(max_workers=4) as pool:
                 for k in range(0, len(live), 40):
                     batch = live[k : k + 40]
-                    # 스레드에는 ORM 객체가 아니라 문자열만 넘긴다. 이어받기: 이미 있는 종목은 마지막 저장일부터
+                    # 스레드에는 ORM 객체가 아니라 문자열만 넘긴다. 이어받기: 이미 있는 종목은 마지막 확정 봉부터
+                    # (저녁 수집과 같은 시작점. 그래야 수정주가 비교 기준일이 받은 구간에 들어간다)
                     jobs = []
                     for i in batch:
-                        last = self.crud.last_bar(i.id)
-                        f0 = max(frm.isoformat(), last.trade_date) if last else frm.isoformat()
+                        has = self.crud.last_bar(i.id) is not None
+                        f0 = max(frm.isoformat(), self._bars_from(i.id, today)) if has else frm.isoformat()
                         jobs.append((i, pool.submit(self.broker.daily_bars, i.code, f0, today.isoformat())))
                     for inst, fut in jobs:
                         try:
@@ -249,6 +248,42 @@ class MarketDataService:
         for st in self.crud.statuses_on(pit.asof.isoformat()):
             out.setdefault(codes[st.instrument_id], set()).add(st.status)
         return out
+
+    def _bars_from(self, instrument_id: int, d: date) -> str:
+        """받기 시작할 날. 마지막 확정 봉부터 받는다.
+
+        그날을 포함해야 수정주가를 감지하고, 그 뒤 잠정 봉(어제 저녁에 받은 값)을 확정값으로 고친다.
+        오래 멈췄어도 빈 구간 없이 채운다.
+        """
+        last = self.crud.last_bar(instrument_id)
+        if last is None:
+            return (d - timedelta(days=10)).isoformat()
+        ref = self.crud.last_final_bar(instrument_id, last.series_no)
+        return (ref or last).trade_date
+
+    def finalize_day(self, d: date) -> list[str]:
+        """그날 봉과 지수를 확정값으로 다시 받는다. 다음 거래일 아침 월말 판단 전에 부른다.
+
+        저녁 수집은 잠정값을 받는다. 판단을 잠정 종가로 하면 나중에 같은 날짜를 재현했을 때
+        다른 종목이 나오고, 실전 전환 관문의 선정 일치 100%를 영영 못 채운다.
+        """
+        day = d.isoformat()
+        col = self._collector()
+        now_iso = self.clock.now().isoformat(timespec="seconds")
+        failed: list[str] = []
+        for k, inst in enumerate(self.crud.instruments(), 1):
+            if inst.delisted_on is not None:
+                continue
+            try:
+                col.collect_bars(inst, self._bars_from(inst.id, d), day, now_iso)
+            except Exception as e:  # noqa: BLE001 - 한 종목 실패가 판단 전체를 막으면 안 된다. 그 종목은 잠정값으로 남는다
+                failed.append(f"{inst.code}: {e}")
+                continue
+            if k % 50 == 0:
+                self.crud.s.commit()
+        col.collect_index(day, day)
+        self.crud.s.commit()
+        return failed
 
     def index_month_ends(self, pit: PointInTime, index_name: str = "KOSPI", n: int = 10) -> dict[str, float]:
         """기준일 이하 월말 종가 n개("YYYY-MM" → 종가). 하락장 현금 전환 규칙(QBOT-PRD-001 R5)이 쓴다."""

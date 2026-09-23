@@ -220,3 +220,98 @@ def test_a_real_adjustment_still_bumps(session):
     res = m.collect_daily(date(2025, 6, 2))
     assert "000001" in res.series_bumped
     assert 2 in {r.series_no for r in session.scalars(select(DailyBar)).all()}
+
+
+def test_evening_bar_that_changes_by_next_day_is_settled_not_a_split(session):
+    """거래일 당일 저녁에 받은 봉도 잠정값이다. 다음 날 값이 달라도 수정주가가 아니다.
+
+    2026-09-23: 전날 18:58에 받은 종가가 다음 날 받은 같은 날 종가와 802종목에서 달라
+    802종목 이력을 통째로 다시 받았다. 당일 봉은 장 마감 뒤에도 저녁까지 바뀐다.
+    """
+    b = base_broker()
+    evening = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 18, 58)),
+        held_codes_fn=lambda: set(),
+    )
+    evening.collect_daily(date(2025, 5, 30))
+    # 다음 거래일: 5/30의 확정 종가는 저녁에 받은 값(1002)과 다르다. 그 전 날들은 그대로다
+    b.days.append(CalendarDay("2025-06-02", True))
+    b.bars["000001"] = [
+        bar("2025-05-28", 1000),
+        bar("2025-05-29", 1001),
+        bar("2025-05-30", 990),
+        bar("2025-06-02", 995),
+    ]
+    next_day = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 6, 2, 18, 30)),
+        held_codes_fn=lambda: set(),
+    )
+    res = next_day.collect_daily(date(2025, 6, 2))
+    assert res.series_bumped == []
+    inst = session.scalars(select(Instrument).where(Instrument.code == "000001")).one()
+    row = session.scalars(
+        select(DailyBar).where(DailyBar.instrument_id == inst.id, DailyBar.trade_date == "2025-05-30")
+    ).one()
+    assert row.close == 990 and row.series_no == 1 and row.collected_at.startswith("2025-06-02")  # 이제 확정
+
+
+def test_finalize_day_rewrites_the_provisional_month_end_bar(session):
+    """월말 판단 전 아침에 그 봉을 확정값으로 다시 받는다."""
+    b = base_broker()
+    evening = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 18, 30)),
+        held_codes_fn=lambda: set(),
+    )
+    evening.collect_daily(date(2025, 5, 30))
+    b.bars["000001"][-1] = bar("2025-05-30", 777)
+    b.index["KOSPI"]["2025-05-30"] = 2555.0
+    morning = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 6, 2, 7, 40)),
+        held_codes_fn=lambda: set(),
+    )
+    assert morning.finalize_day(date(2025, 5, 30)) == []
+    inst = session.scalars(select(Instrument).where(Instrument.code == "000001")).one()
+    row = session.scalars(
+        select(DailyBar).where(DailyBar.instrument_id == inst.id, DailyBar.trade_date == "2025-05-30")
+    ).one()
+    assert row.close == 777 and row.series_no == 1
+    kospi = session.scalars(
+        select(IndexLevel).where(IndexLevel.index_name == "KOSPI", IndexLevel.date == "2025-05-30")
+    ).one()
+    assert kospi.close == 2555.0
+
+
+def test_backfill_resume_still_detects_a_split_after_a_provisional_evening(session, tmp_path):
+    """이어받는 적재도 마지막 확정 봉부터 받는다. 잠정 봉부터 받으면 비교 기준일이 빠져 분할을 놓친다."""
+    b = base_broker()
+    MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 18, 30)),
+        held_codes_fn=lambda: set(),
+    ).collect_daily(date(2025, 5, 30))
+    b.days.append(CalendarDay("2025-06-02", True))
+    b.bars["000001"] = [bar("2025-05-28", 500), bar("2025-05-29", 501), bar("2025-05-30", 502), bar("2025-06-02", 503)]
+    m = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 6, 2, 18, 30)),
+        held_codes_fn=lambda: set(),
+    )
+    m.backfill(date(2025, 5, 1), ["bars"])
+    inst = session.scalars(select(Instrument).where(Instrument.code == "000001")).one()
+    assert 2 in set(session.scalars(select(DailyBar.series_no).where(DailyBar.instrument_id == inst.id)))

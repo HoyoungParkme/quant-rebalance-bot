@@ -117,11 +117,27 @@ class Jobs:
         self.app.ops.notify("summary", self.app.reporting.daily_summary(d))
 
     def month_end_decide(self) -> None:
-        """18:50. 오늘이 월말 거래일이면 다음 달 종목을 정한다 (UC-A2)."""
+        """07:00. 어제가 월말 거래일이면 그 봉을 확정값으로 다시 받고 다음 달 종목을 정한다 (UC-A2).
+
+        월말 당일 저녁에 판단하지 않는다. 증권사 당일 봉은 장 마감 뒤에도 저녁까지 바뀌어서,
+        그 값으로 고르면 나중에 확정 종가로 재현했을 때 다른 종목이 나온다(관문의 선정 일치 100%).
+        기준일은 그대로 월말이다. 공시도 기준일 전날까지만 읽으므로 입력은 저녁 판단과 같다.
+        """
         d = self._today()
-        if d.isoformat() not in self.app.md.month_ends_until(d, 1):
+        prev = self.app.md.crud.calendar_between(
+            (d - timedelta(days=14)).isoformat(), (d - timedelta(days=1)).isoformat()
+        )
+        if not prev:
             return
-        self.app.decision.decide_month_end(d, self.app.settings.mode)
+        asof = date.fromisoformat(prev[-1])
+        if prev[-1] not in self.app.md.month_ends_until(asof, 1):
+            return
+        failed = self.app.md.finalize_day(asof)
+        if failed:
+            self.app.ops.notify(
+                "error", f"{asof} 봉 확정 실패 {len(failed)}종목(잠정값으로 판단): {', '.join(failed[:5])}"
+            )
+        self.app.decision.decide_month_end(asof, self.app.settings.mode)
 
     def monthly_report(self) -> None:
         """19:00. 이번 달 첫 거래일이면 지난달 보고 (UC-A6)."""
@@ -176,12 +192,12 @@ def build_scheduler(app, jobs: Jobs | None = None) -> BackgroundScheduler:
         executors={"default": ThreadPoolExecutor(1)},  # 작업끼리도 겹치지 않게 한 줄로 돈다
     )
     plan = [
+        ("decide", 7, 0, lambda: j.run("월말 판단", j.month_end_decide)),
         ("prepare", 8, 20, lambda: j.run("주문 준비", j.prepare)),
         ("sell", 8, 40, lambda: j.run("장 시작 전 매도", j.sell_phase)),
         ("buy", 9, 5, lambda: j.run("매수", j.buy_phase)),
         ("cancel", 15, 40, lambda: j.run("미체결 취소", j.cancel_open)),
         ("evening", 18, 30, lambda: j.run("저녁 수집", j.evening, trading_only=False)),
-        ("decide", 18, 50, lambda: j.run("월말 판단", j.month_end_decide)),
         ("report", 19, 0, lambda: j.run("월간 보고", j.monthly_report)),
         ("backup", 19, 30, lambda: j.run("백업", j.backup, trading_only=False)),
     ]

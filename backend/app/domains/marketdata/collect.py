@@ -125,35 +125,36 @@ class Collector:
         last = self.crud.last_bar(inst.id)
         series = last.series_no if last else 1
         bumped = False
-        # 끝난 날끼리만 비교한다. 오늘 봉은 장중에 받아 두면 확정 종가와 다른데,
-        # 그것은 수정주가가 아니라 아직 안 끝난 하루다. 그걸로 판을 올리면 전 종목 이력을 다시 받는다
-        if last is not None and last.trade_date < to:
-            hit = next((b for b in bars if b.date == last.trade_date), None)
-            if hit is not None and hit.close != last.close and hit.close > 0:
+        # 확정된 봉끼리만 비교한다. 거래일 당일에 받은 봉은 장 마감 뒤에도 잠정값이라 다음 날 값과
+        # 다르다. 그 차이를 수정주가로 보면 판을 올려 수백 종목 이력을 통째로 다시 받는다
+        # (2026-09-22 장중 값, 2026-09-23 저녁 값 — 두 번 겪었다)
+        ref = self.crud.last_final_bar(inst.id, series) if last is not None else None
+        if ref is not None:
+            hit = next((b for b in bars if b.date == ref.trade_date), None)
+            if hit is not None and hit.close != ref.close and hit.close > 0:
                 series += 1
                 bumped = True
                 bars = self.broker.daily_bars(inst.code, "2019-01-01", to)  # 새 판으로 전체 다시
         have = self.crud.existing_bar_dates(inst.id, series, frm=min(b.date for b in bars))
         rows = [self._to_row(inst.id, b, series, now_iso) for b in bars if b.date not in have]
         self.crud.add_bars(rows)
-        self._settle_today(inst, bars, to, series, have, now_iso)
+        self._settle_provisional(inst, bars, series, now_iso)
         return len(rows), bumped
 
-    def _settle_today(self, inst: Instrument, bars: list[Bar], to: str, series: int, have: set, now_iso: str) -> None:
-        """오늘 봉이 이미 있으면 확정값으로 고친다.
+    def _settle_provisional(self, inst: Instrument, bars: list[Bar], series: int, now_iso: str) -> None:
+        """잠정 봉을 새로 받은 값으로 고친다.
 
-        과거를 고치는 것이 아니라 같은 날의 잠정값을 확정값으로 바꾸는 것이다.
-        안 고치면 장중에 받아 둔 현재가가 그날 종가로 영영 남는다.
+        과거를 고치는 것이 아니라 아직 확정되지 않은 날의 값을 확정값으로 바꾸는 것이다.
+        받은 시각도 갱신하므로, 다음 날 이 일을 하면 그 봉은 확정이 된다.
         """
-        if to not in have:
-            return
-        fresh = next((b for b in bars if b.date == to), None)
-        row = self.crud.bar_on(inst.id, to, series) if fresh else None
-        if row is None or (row.close == fresh.close and row.volume == fresh.volume):
-            return
-        row.open, row.high, row.low, row.close = fresh.open, fresh.high, fresh.low, fresh.close
-        row.volume, row.amount, row.traded = fresh.volume, fresh.amount, int(fresh.volume > 0)
-        row.collected_at = now_iso
+        fresh = {b.date: b for b in bars}
+        for row in self.crud.provisional_bars(inst.id, series, min(fresh)):
+            f = fresh.get(row.trade_date)
+            if f is None:
+                continue
+            row.open, row.high, row.low, row.close = f.open, f.high, f.low, f.close
+            row.volume, row.amount, row.traded = f.volume, f.amount, int(f.volume > 0)
+            row.collected_at = now_iso
 
     @staticmethod
     def _to_row(instrument_id: int, b: Bar, series: int, now_iso: str) -> DailyBar:

@@ -142,6 +142,34 @@ class MarketDataCrud:
         )
         return self.s.scalar(stmt)
 
+    def last_final_bar(self, instrument_id: int, series_no: int) -> DailyBar | None:
+        """확정된 마지막 봉. 그 거래일보다 뒤에 받은 봉만 확정이다.
+
+        같은 날 받은 봉은 장이 끝난 뒤라도 잠정값이다. 증권사 당일 봉은 저녁까지 바뀐다
+        (2026-09-23 18:30에 받은 값과 19:44에 받은 값이 달랐다).
+        """
+        stmt = (
+            select(DailyBar)
+            .where(
+                DailyBar.instrument_id == instrument_id,
+                DailyBar.series_no == series_no,
+                func.substr(DailyBar.collected_at, 1, 10) > DailyBar.trade_date,
+            )
+            .order_by(DailyBar.trade_date.desc())
+            .limit(1)
+        )
+        return self.s.scalar(stmt)
+
+    def provisional_bars(self, instrument_id: int, series_no: int, frm: str) -> list[DailyBar]:
+        """frm 이후 잠정 봉(그 거래일 당일이나 그 전에 받은 봉)."""
+        stmt = select(DailyBar).where(
+            DailyBar.instrument_id == instrument_id,
+            DailyBar.series_no == series_no,
+            DailyBar.trade_date >= frm,
+            func.substr(DailyBar.collected_at, 1, 10) <= DailyBar.trade_date,
+        )
+        return list(self.s.scalars(stmt))
+
     def bar_on(self, instrument_id: int, trade_date: str, series_no: int) -> DailyBar | None:
         stmt = select(DailyBar).where(
             DailyBar.instrument_id == instrument_id,
