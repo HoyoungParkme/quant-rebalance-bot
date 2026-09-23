@@ -185,6 +185,8 @@ upstream: [QBOT-UC-001, QBOT-DOM-001, QBOT-INFRA-001]
 
 스케줄과 메신저 입구를 함께 돌린다([[QBOT-INFRA-001#C3]]). 자동 시작이 실행하는 것이 이것이다.
 
+**모드마다 한 대만 돈다.** 시작할 때 `~/.qbot/qbot-{모드}.lock`에 파일 잠금을 걸고, 이미 누가 쥐고 있으면 "이미 돌고 있다"로 거부한다. 두 대가 뜨면 스케줄이 두 번 돌아 같은 주문이 두 번 나갈 수 있다. 잠금은 프로세스가 죽으면 운영체제가 푼다. 멈출 때는 `tools/qstop.sh`를 쓴다(감시 스크립트까지 함께 끈다).
+
 ```json
 {"name":"run","inputSchema":{"type":"object","properties":{},"additionalProperties":false}}
 ```
@@ -219,6 +221,7 @@ upstream: [QBOT-UC-001, QBOT-DOM-001, QBOT-INFRA-001]
 | 계좌 불일치 알림을 받았다 | `reconcile` → 원인 확인 → `reconcile_accept --reason "…" [--external-flow 금액] --confirm` |
 | 실전으로 넘어간다 | `gate_check` → 통과 확인 → 실전 키를 환경 변수에 넣고 → `gate_approve --capital-krw 3000000 --confirm` → `QBOT_MODE=live`로 재시작 |
 | 연초 | `review_run` → 결과를 읽고 `review_approve --review-id N --confirm` 또는 무시 |
+| 코드를 바꿔 다시 띄운다 | `tools/qstop.sh` → 저장소 받기 → `run` (월말 판단일과 다음 거래일은 피한다) |
 
 ## 5. 미결사항
 
