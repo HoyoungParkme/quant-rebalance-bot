@@ -17,6 +17,7 @@ from app.domains.marketdata.crud import MarketDataCrud
 from app.domains.marketdata.models import DailyBar, Filing, FinancialSnapshot, Instrument, InstrumentStatus
 from app.domains.marketdata.ports import Bar, BrokerPort, FilingInfo, FilingPort, InstrumentInfo
 
+INDEX_NAMES = ("KOSPI", "KOSPI200", "KOSDAQ")
 ALERT_KEYWORDS = ("감사의견", "의견거절", "횡령", "배임", "거래정지", "상장폐지", "회생", "파산")
 REPRT_PERIOD = {
     "11013": ("03-31", "quarter"),
@@ -273,7 +274,7 @@ class Collector:
 
     def collect_index(self, frm: str, to: str) -> int:
         n = 0
-        for name in ("KOSPI", "KOSPI200", "KOSDAQ"):
+        for name in INDEX_NAMES:
             for d, c in self.broker.index_closes(name, frm, to).items():
                 self.crud.upsert_index(name, d, c)
                 n += 1

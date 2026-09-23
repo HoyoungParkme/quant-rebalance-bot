@@ -104,8 +104,15 @@ class KisAdapter:
         return [CalendarDay(d, v) for d, v in sorted(out.items()) if frm <= d <= to]
 
     def index_closes(self, index_name: str, frm: str, to: str) -> dict[str, float]:
+        """업종 지수 일별 종가. 뒤에서부터 페이지를 넘긴다.
+
+        한 페이지 크기를 가정하지 않는다. 일봉은 100개씩이지만 지수는 50개씩 와서,
+        "100개 미만이면 끝"으로 짜면 첫 페이지(두 달 남짓)에서 멈춘다.
+        그러면 추세 필터가 10개월이 아니라 있는 만큼(2~3개월) 평균으로 판단한다.
+        """
         out: dict[str, float] = {}
         end = to
+        prev_oldest = None
         while True:
             body = self.c.get(
                 "/uapi/domestic-stock/v1/quotations/inquire-daily-indexchartprice",
@@ -125,7 +132,8 @@ class KisAdapter:
                 d = r["stck_bsop_date"]
                 out[f"{d[:4]}-{d[4:6]}-{d[6:]}"] = float(r["bstp_nmix_prpr"])
             oldest = min(r["stck_bsop_date"] for r in rows)
-            if len(rows) < 100 or oldest <= frm.replace("-", ""):
+            if oldest <= frm.replace("-", "") or oldest == prev_oldest:  # 다 받았거나 더 오래된 자료가 없다
                 break
+            prev_oldest = oldest
             end = (date.fromisoformat(f"{oldest[:4]}-{oldest[4:6]}-{oldest[6:]}") - timedelta(days=1)).isoformat()
-        return dict(sorted(out.items()))
+        return {d: c for d, c in sorted(out.items()) if frm <= d <= to}

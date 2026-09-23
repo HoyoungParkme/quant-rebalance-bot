@@ -83,7 +83,9 @@ def seed_market(session, n: int = 15, asof: str = "2025-05-30", seed: int = 0, i
                     operating_income=int(base * 0.25 * (1 + 0.2 * (k % 3))),
                 )
             )
-    months = pd.date_range(end=asof, periods=12, freq="ME").strftime("%Y-%m-%d")
+    # 실제 봇은 판단일 저녁에 그날 지수를 저장한다. 판단일이 속한 달의 값은 판단일 종가다
+    months = [*pd.date_range(end=asof, periods=12, freq="ME").strftime("%Y-%m-%d"), str(asof)]
+    months = sorted({m[:7]: m for m in months}.values())[-12:]
     for i, m in enumerate(months):
         close = 2500 + i * 20 if index_trend == "up" else 3000 - i * 30
         session.add(IndexLevel(index_name="KOSPI", date=m, close=close))

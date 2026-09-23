@@ -122,10 +122,26 @@ def test_replay_stored_falls_back_to_research_file(session):
     assert r.compared_with == "research_file"
 
 
-def test_trend_filter_with_short_history_uses_available_months(session):
+def test_trend_filter_refuses_short_index_history(session):
+    """지수 이력이 10개월이 안 되면 판단을 거부한다. 짧은 평균으로 조용히 판단하면 규칙이 바뀐 것과 같다.
+
+    2026-09-23 실제로 지수 적재가 첫 페이지(두 달)에서 멈춰 3개월 평균으로 판단할 뻔했다.
+    """
     seed_market(session, index_trend="down")
     cfg = seed_default_config(DecisionCrud(session), "2025-01-01")
     cfg.trend_filter = 1
     session.flush()
     session.query(IndexLevel).filter(IndexLevel.date < "2025-04-01").delete()
-    assert make(session).decide_month_end(ASOF, "paper").cash_switch == 1
+    with pytest.raises(DataNotReady, match="코스피 월말 종가"):
+        make(session).decide_month_end(ASOF, "paper")
+
+
+def test_trend_filter_refuses_a_gap_month(session):
+    """개수가 10개여도 중간 달이 비면 거부한다. 봇이 한 달 넘게 꺼졌다 켜지면 실제로 생긴다."""
+    seed_market(session, index_trend="down")
+    cfg = seed_default_config(DecisionCrud(session), "2025-01-01")
+    cfg.trend_filter = 1
+    session.flush()
+    session.query(IndexLevel).filter(IndexLevel.date.like("2025-02%")).delete()
+    with pytest.raises(DataNotReady, match="2025-02"):
+        make(session).decide_month_end(ASOF, "paper")

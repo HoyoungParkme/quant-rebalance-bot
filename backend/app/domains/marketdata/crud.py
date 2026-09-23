@@ -90,8 +90,11 @@ class MarketDataCrud:
         )
         return list(self.s.scalars(stmt))
 
-    def index_month_end_closes(self, index_name: str, until: str, n: int) -> list[float]:
-        """until 이하 월말 종가 n개(오름차순). 추세 필터용."""
+    def index_month_end_closes(self, index_name: str, until: str, n: int) -> dict[str, float]:
+        """until 이하 월말 종가 n개. 키는 "YYYY-MM"(오름차순). 추세 필터용.
+
+        달을 키로 돌려줘야 부르는 쪽이 빈 달을 알아챈다. 값만 주면 중간이 빠져도 개수는 채워진다.
+        """
         from app.domains.marketdata.models import IndexLevel
 
         stmt = (
@@ -102,7 +105,12 @@ class MarketDataCrud:
         by_month: dict[str, float] = {}
         for d, c in self.s.execute(stmt):
             by_month[d[:7]] = c  # 같은 달의 마지막 날이 남는다
-        return list(by_month.values())[-n:]
+        return dict(list(by_month.items())[-n:])
+
+    def last_index_date(self, index_name: str) -> str | None:
+        from app.domains.marketdata.models import IndexLevel
+
+        return self.s.scalar(select(func.max(IndexLevel.date)).where(IndexLevel.index_name == index_name))
 
     def has_bars_on(self, day: str) -> bool:
         return self.s.scalar(select(func.count()).select_from(DailyBar).where(DailyBar.trade_date == day)) > 0

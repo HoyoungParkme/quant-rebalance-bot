@@ -25,6 +25,7 @@ from app.domains.marketdata.service import MarketDataService
 RESEARCH_TOP60 = Path(__file__).resolve().parents[4] / "docs" / "research" / "05-paper-run-1m" / "top60_by_month.csv"
 DEFAULT_FACTORS = {"EP": 1, "SP": 1, "ROE": 1, "OPG": 1, "OPG_Q": 1, "VOL60": -1, "TURN20": -1}
 EXCLUDING_STATUSES = {"managed", "warning", "danger", "halted", "liquidation"}
+TREND_MONTHS = 10  # 하락장 현금 전환: 코스피 월말 종가 10개월 평균 (검증 rules.json "trend")
 
 
 @dataclass(frozen=True)
@@ -117,9 +118,17 @@ class DecisionService:
         sel = scoring.select(scored, budget, cfg.n_holdings, excluded)
         cash_switch = 0
         if cfg.trend_filter:
-            closes = self.md.index_month_ends(pit, "KOSPI", 10)
-            # 검증 simulate.py 15행: 있는 만큼(최대 10개)의 평균보다 높을 때만 "상승". 아니면 현금
-            if closes and not closes[-1] > sum(closes) / len(closes):
+            by_month = self.md.index_month_ends(pit, "KOSPI", TREND_MONTHS)
+            # 검증 simulate.py는 자료 시작 부근에서 "있는 만큼"의 평균을 썼다. 운용에서 기준 달로 끝나는
+            # 연속 10개월이 없다는 건 적재가 빠졌다는 뜻이다. 짧거나 구멍 난 평균으로 조용히 판단하면
+            # 규칙이 바뀐 것과 같다
+            want = _months_ending(pit.asof, TREND_MONTHS)
+            if list(by_month) != want:
+                missing = sorted(set(want) - set(by_month))
+                raise DataNotReady(f"코스피 월말 종가가 빠진 달이 있다: {', '.join(missing) or '기준 달 밖의 자료'}")
+            closes = list(by_month.values())
+            # 검증 simulate.py 15행: 평균보다 높을 때만 "상승". 아니면 현금
+            if not closes[-1] > sum(closes) / len(closes):
                 sel.picked, cash_switch = [], 1
                 sel.top60["selected"] = False  # 저장되는 상위 60에도 선정 없음으로
         index_rebalance = 0
@@ -353,6 +362,16 @@ class DecisionService:
             return ReplayResult(asof, sel.picked, "research_file", ref == got, _diff(ref, got))
         _ = d
         return ReplayResult(asof, sel.picked, "none", None, [])
+
+
+def _months_ending(asof: date, n: int) -> list[str]:
+    """asof가 속한 달로 끝나는 연속 n개월("YYYY-MM", 오름차순)."""
+    y, m = asof.year, asof.month
+    out = []
+    for _ in range(n):
+        out.append(f"{y:04d}-{m:02d}")
+        y, m = (y, m - 1) if m > 1 else (y - 1, 12)
+    return out[::-1]
 
 
 def _portfolio_from_budget(budget: int, cfg: StrategyConfig) -> Portfolio:

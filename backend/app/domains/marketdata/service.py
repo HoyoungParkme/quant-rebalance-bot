@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.clock import Clock
 from app.core.errors import BrokerUnavailable, Precondition, QbotError
 from app.core.pit import PointInTime
-from app.domains.marketdata.collect import Collector, CollectResult
+from app.domains.marketdata.collect import INDEX_NAMES, Collector, CollectResult
 from app.domains.marketdata.crud import MarketDataCrud
 from app.domains.marketdata.models import Instrument
 
@@ -90,7 +90,10 @@ class MarketDataService:
                 done += 1
                 if done % 50 == 0:
                     self.crud.s.commit()
-            col.collect_index((d - timedelta(days=30)).isoformat(), day)
+            # 지수는 마지막으로 받은 날부터 채운다. 30일만 받으면 봇이 한 달 넘게 꺼졌던 뒤
+            # 빈 달이 생기고, 추세 필터가 그 달을 건너뛴 평균을 쓰게 된다
+            last = min((self.crud.last_index_date(name) or "") for name in INDEX_NAMES)
+            col.collect_index(min(last or day, (d - timedelta(days=30)).isoformat()), day)
             self.crud.s.commit()
             # 공시는 전자공시 반영이 며칠 늦을 수 있어 2주를 다시 훑는다. 이미 넣은 것은 건너뛴다
             res.filings_added, res.alerts = col.collect_filings((d - timedelta(days=14)).isoformat(), day, now_iso)
@@ -247,8 +250,8 @@ class MarketDataService:
             out.setdefault(codes[st.instrument_id], set()).add(st.status)
         return out
 
-    def index_month_ends(self, pit: PointInTime, index_name: str = "KOSPI", n: int = 10) -> list[float]:
-        """기준일 이하 월말 종가 n개. 하락장 현금 전환 규칙(QBOT-PRD-001 R5)이 쓴다."""
+    def index_month_ends(self, pit: PointInTime, index_name: str = "KOSPI", n: int = 10) -> dict[str, float]:
+        """기준일 이하 월말 종가 n개("YYYY-MM" → 종가). 하락장 현금 전환 규칙(QBOT-PRD-001 R5)이 쓴다."""
         return self.crud.index_month_end_closes(index_name, pit.bars_until().isoformat(), n)
 
     def has_bars_on(self, pit: PointInTime) -> bool:

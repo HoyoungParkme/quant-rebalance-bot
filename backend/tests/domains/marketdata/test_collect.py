@@ -7,7 +7,14 @@ from datetime import date, datetime
 from sqlalchemy import func, select
 
 from app.core.clock import FrozenClock
-from app.domains.marketdata.models import DailyBar, Filing, FinancialSnapshot, Instrument, InstrumentStatus
+from app.domains.marketdata.models import (
+    DailyBar,
+    Filing,
+    FinancialSnapshot,
+    IndexLevel,
+    Instrument,
+    InstrumentStatus,
+)
 from app.domains.marketdata.ports import CalendarDay, FilingInfo, FinancialRows, InstrumentInfo
 from app.domains.marketdata.service import MarketDataService
 from tests.domains.marketdata.fakes import FakeBroker, FakeFilings, bar
@@ -147,6 +154,24 @@ def test_gap_after_outage_is_filled(session):
     assert res.bars_ok == 6
     dates = set(session.scalars(select(DailyBar.trade_date)))
     assert {"2025-05-07", "2025-05-08", "2025-05-30"} <= dates
+
+
+def test_index_gap_after_long_outage_is_filled(session):
+    """지수는 마지막으로 받은 날부터 채운다. 30일만 받으면 한 달 넘게 꺼졌던 뒤 월말이 빠진다.
+
+    빠진 월말은 추세 필터가 "연속 10개월"을 못 채워 판단을 거부하게 만든다.
+    """
+    b = base_broker(days=("2025-03-03",))
+    b.index["KOSPI200"]["2025-03-03"] = b.index["KOSDAQ"]["2025-03-03"] = 2500.0
+    s = svc(session, b, FakeFilings())
+    s.collect_daily(date(2025, 3, 3))
+    for d in ("2025-03-31", "2025-04-30", "2025-05-30"):  # 3월 초부터 5월 말까지 꺼져 있었다
+        b.days.append(CalendarDay(d, True))
+        for name in ("KOSPI", "KOSPI200", "KOSDAQ"):
+            b.index[name][d] = 2600.0
+    s.collect_daily(date(2025, 5, 30))
+    got = set(session.scalars(select(IndexLevel.date).where(IndexLevel.index_name == "KOSPI")))
+    assert {"2025-03-31", "2025-04-30", "2025-05-30"} <= got
 
 
 def test_bad_master_does_not_mass_delist(session):
