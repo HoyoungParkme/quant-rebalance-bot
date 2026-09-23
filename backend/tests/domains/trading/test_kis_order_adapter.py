@@ -27,7 +27,7 @@ class FakeKis:
         self.gets.append((path, tr_id, params, tr_cont))
         if "inquire-balance" in path:
             return self.balance_body
-        return self.ccld_pages.pop(0) if self.ccld_pages else {"output1": [], "_tr_cont": "D"}
+        return self.ccld_pages.pop(0) if self.ccld_pages else {"output1": [], "output2": [{}], "_tr_cont": "D"}
 
 
 def adapter(c, mode="paper"):
@@ -117,3 +117,49 @@ def test_balance_falls_back_when_total_is_empty():
     c.balance_body = {"output1": [], "output2": [{"dnca_tot_amt": "500000"}], "_tr_cont": "D"}
     b = adapter(c).balance()
     assert b.cash == 500_000 and b.total_equity == 500_000
+
+
+def test_paper_fill_is_reconstructed_from_the_balance():
+    """모의투자는 주문별 체결을 주지 않는다. 잔고 변화로 재구성하지 않으면 체결을 영영 모른다."""
+    c = FakeKis()
+    c.balance_body = {
+        "output1": [],
+        "output2": [{"prvs_rcdl_excc_amt": "1000000", "tot_evlu_amt": "1000000"}],
+        "_tr_cont": "D",
+    }
+    ad = adapter(c)
+    no = ad.place_order(OrderRequest("005930", "buy", 2, 70_000))  # 보내기 전 보유 0
+    c.balance_body["output1"] = [{"pdno": "005930", "hldg_qty": "2", "pchs_avg_pric": "70500", "evlu_amt": "141000"}]
+    st = ad.order_status(no)
+    assert st is not None and st.filled_qty == 2 and st.avg_price == 70_500  # 매입원가 증가분 ÷ 수량
+    assert st.code == "005930" and st.side == "buy"
+
+
+def test_paper_sell_uses_the_day_average_so_totals_match():
+    """종목별 값은 뭉뚱그려지지만 수량 가중 평균이라 합계는 정확하다."""
+    c = FakeKis()
+    c.balance_body = {
+        "output1": [{"pdno": "005930", "hldg_qty": "3", "pchs_avg_pric": "70000", "evlu_amt": "210000"}],
+        "output2": [{"prvs_rcdl_excc_amt": "0", "tot_evlu_amt": "210000"}],
+        "_tr_cont": "D",
+    }
+    ad = adapter(c)
+    no = ad.place_order(OrderRequest("005930", "sell", 3, 71_000))
+    c.balance_body["output1"] = []  # 전량 매도됨
+    c.ccld_pages = [  # 첫 조회는 주문 목록(모의는 늘 비어 있다), 두 번째가 그날 매도 합계
+        {"output1": [], "output2": [{}], "_tr_cont": "D"},
+        {"output1": [], "output2": [{"tot_ccld_qty": "3", "tot_ccld_amt": "213000"}], "_tr_cont": "D"},
+    ]
+    st = ad.order_status(no)
+    assert st.filled_qty == 3 and st.avg_price == 71_000  # 213,000 ÷ 3
+
+
+def test_live_rows_win_over_reconstruction():
+    """실전은 주문별 내역이 온다. 그때는 재구성하지 않는다."""
+    c = FakeKis()
+    c.balance_body = {"output1": [], "output2": [{"dnca_tot_amt": "0"}], "_tr_cont": "D"}
+    ad = adapter(c, "live")
+    no = ad.place_order(OrderRequest("005930", "buy", 3, 70_000))
+    c.ccld_pages = [{"output1": [ccld(odno="0000012345")], "_tr_cont": "D"}]
+    st = ad.order_status(no)
+    assert st.filled_qty == 3 and st.avg_price == 70500 and st.raw_no == "0000012345"

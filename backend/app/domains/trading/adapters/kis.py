@@ -35,12 +35,20 @@ def _norm(no: str) -> str:
 
 
 class KisOrderAdapter:
+    """모의투자는 주문별 체결 내역을 주지 않는다(합계만 준다).
+
+    `inquire-daily-ccld`의 output1이 늘 비어 있고 정정취소가능주문조회는 아예 막혀 있다.
+    그래서 모의에서는 **잔고 변화와 그날 체결 합계**로 체결을 재구성한다. 그러지 않으면
+    봇이 자기 체결을 기록하지 못해 보유·예수금 대조가 매일 어긋난다.
+    """
+
     def __init__(self, client: KisClient, account: str, product: str, mode: str, clock: Clock) -> None:
         self.c = client
         self.account = account
         self.product = product
         self.tr = LIVE_TR if mode == "live" else PAPER_TR
         self.clock = clock
+        self._placed: dict[str, dict] = {}  # 주문번호 → 보낼 때의 잔고. 모의 체결 재구성용
 
     def _acct(self) -> dict:
         return {"CANO": self.account, "ACNT_PRDT_CD": self.product}
@@ -55,11 +63,67 @@ class KisOrderAdapter:
             "ORD_QTY": str(req.qty),
             "ORD_UNPR": str(req.price if limit else 0),
         }
+        before = self._snapshot(req.code)  # 보내기 전 잔고. 모의에서 체결을 재구성할 때 쓴다
         out = self.c.post(ORDER_PATH, self.tr[req.side], body).get("output") or {}
         no = out.get("ODNO", "")
         if not no.strip():
             raise ValueError(f"주문번호가 비었다: {out}")
-        return _norm(no)
+        no = _norm(no)
+        self._placed[no] = {"code": req.code, "side": req.side, "qty": req.qty, **before}
+        return no
+
+    def _snapshot(self, code: str) -> dict:
+        """그 종목의 지금 보유 수량·매입원가."""
+        h = self.balance().holdings.get(code)
+        return {"qty_before": h.qty if h else 0, "cost_before": (h.qty * h.avg_cost) if h else 0}
+
+    def _day_side_avg(self, side: str) -> int:
+        """오늘 그 방향의 평균 체결가. 종목별로는 섞이지만 **합계는 정확하다**.
+
+        여러 종목을 같은 날 팔면 종목별 값은 뭉뚱그려지지만, 수량 가중 평균이라
+        Σ(수량×평균) = Σ(수량×실제)가 되어 예수금 대조가 어긋나지 않는다.
+        """
+        d = self.clock.today().isoformat().replace("-", "")
+        body = self.c.get(
+            CCLD_PATH,
+            self.tr["ccld"],
+            {
+                **self._acct(),
+                "INQR_STRT_DT": d,
+                "INQR_END_DT": d,
+                "SLL_BUY_DVSN_CD": "01" if side == "sell" else "02",
+                "INQR_DVSN": "00",
+                "PDNO": "",
+                "CCLD_DVSN": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_3": "00",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": "",
+            },
+        )
+        agg = body.get("output2") or [{}]
+        agg = agg[0] if isinstance(agg, list) else agg
+        qty, amt = _num(agg.get("tot_ccld_qty")), _num(agg.get("tot_ccld_amt"))
+        return round(amt / qty) if qty else 0
+
+    def _reconstruct(self, order_no: str) -> BrokerOrder | None:
+        """잔고 변화로 체결을 재구성한다 (모의투자 전용 경로)."""
+        p = self._placed.get(order_no)
+        if p is None:
+            return None
+        h = self.balance().holdings.get(p["code"])
+        now_qty, now_cost = (h.qty, h.qty * h.avg_cost) if h else (0, 0)
+        moved = (now_qty - p["qty_before"]) if p["side"] == "buy" else (p["qty_before"] - now_qty)
+        filled = max(min(moved, p["qty"]), 0)
+        if filled == 0:
+            price = 0
+        elif p["side"] == "buy":
+            price = round((now_cost - p["cost_before"]) / filled)  # 매입원가 증가분이 곧 체결 금액
+        else:
+            price = self._day_side_avg("sell")
+        return BrokerOrder(order_no, p["code"], p["side"], p["qty"], filled, price, raw_no=order_no)
 
     def cancel_order(self, order_no: str) -> bool:
         """전량 취소. 이미 체결·취소됐으면 False."""
@@ -80,7 +144,8 @@ class KisOrderAdapter:
         return True
 
     def order_status(self, order_no: str) -> BrokerOrder | None:
-        return self._find(order_no)
+        found = self._find(order_no)
+        return found if found is not None else self._reconstruct(order_no)
 
     def _find(self, order_no: str) -> BrokerOrder | None:
         want = _norm(order_no)
