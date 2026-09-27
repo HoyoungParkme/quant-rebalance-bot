@@ -94,6 +94,7 @@ class MarketDataService:
             col.collect_index(min(last or day, (d - timedelta(days=30)).isoformat()), day)
             self.crud.s.commit()
             # 공시는 전자공시 반영이 며칠 늦을 수 있어 2주를 다시 훑는다. 이미 넣은 것은 건너뛴다
+            res.late_changes = col.late_changes
             res.filings_added, res.alerts = col.collect_filings((d - timedelta(days=14)).isoformat(), day, now_iso)
         finally:
             self.crud.s.commit()  # 도중에 실패해도 받은 만큼 남긴다
@@ -250,40 +251,28 @@ class MarketDataService:
         return out
 
     def _bars_from(self, instrument_id: int, d: date) -> str:
-        """받기 시작할 날. 마지막 확정 봉부터 받는다.
+        """받기 시작할 날. 수정주가 비교 기준일(마지막 확정 봉 하나 앞)부터 받는다.
 
-        그날을 포함해야 수정주가를 감지하고, 그 뒤 잠정 봉(어제 저녁에 받은 값)을 확정값으로 고친다.
+        그날을 포함해야 수정주가를 감지하고, 그 뒤 잠정 봉을 확정값으로 고친다.
         오래 멈췄어도 빈 구간 없이 채운다.
         """
         last = self.crud.last_bar(instrument_id)
         if last is None:
             return (d - timedelta(days=10)).isoformat()
-        ref = self.crud.last_final_bar(instrument_id, last.series_no)
-        return (ref or last).trade_date
+        finals = self.crud.final_bars(instrument_id, last.series_no, 2)
+        return (finals[-1] if finals else last).trade_date
 
-    def finalize_day(self, d: date) -> list[str]:
-        """그날 봉과 지수를 확정값으로 다시 받는다. 다음 거래일 아침 월말 판단 전에 부른다.
+    def bars_ready(self, d: date, min_ratio: float = 0.95) -> tuple[bool, str]:
+        """그날 확정 봉이 충분히 모였는가. 월말 판단 전에 본다.
 
-        저녁 수집은 잠정값을 받는다. 판단을 잠정 종가로 하면 나중에 같은 날짜를 재현했을 때
-        다른 종목이 나오고, 실전 전환 관문의 선정 일치 100%를 영영 못 채운다.
+        기준은 직전 거래일에 봉이 있던 종목 수. 수집이 실패했거나 20:00 전에 받은 봉뿐이면 판단하지 않는다.
         """
         day = d.isoformat()
-        col = self._collector()
-        now_iso = self.clock.now().isoformat(timespec="seconds")
-        failed: list[str] = []
-        for k, inst in enumerate(self.crud.instruments(), 1):
-            if inst.delisted_on is not None:
-                continue
-            try:
-                col.collect_bars(inst, self._bars_from(inst.id, d), day, now_iso)
-            except Exception as e:  # noqa: BLE001 - 한 종목 실패가 판단 전체를 막으면 안 된다. 그 종목은 잠정값으로 남는다
-                failed.append(f"{inst.code}: {e}")
-                continue
-            if k % 50 == 0:
-                self.crud.s.commit()
-        col.collect_index(day, day)
-        self.crud.s.commit()
-        return failed
+        prev = self.crud.calendar_between((d - timedelta(days=14)).isoformat(), (d - timedelta(days=1)).isoformat())
+        want = self.crud.bar_count(prev[-1]) if prev else 0
+        got = self.crud.final_bar_count(day)
+        ok = got > 0 and (want == 0 or got >= want * min_ratio)
+        return ok, f"{day} 확정 봉 {got:,}개 / 직전 거래일 {want:,}개"
 
     def index_month_ends(self, pit: PointInTime, index_name: str = "KOSPI", n: int = 10) -> dict[str, float]:
         """기준일 이하 월말 종가 n개("YYYY-MM" → 종가). 하락장 현금 전환 규칙(QBOT-PRD-001 R5)이 쓴다."""

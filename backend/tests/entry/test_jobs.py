@@ -20,9 +20,12 @@ def fake_app(session=None, trading_day=True, **kw):
                 [x for x in kw["days"] if f <= x <= t] if "days" in kw else ([f] if trading_day else [])
             )
         ),
-        collect_daily=lambda d: calls.append(("collect", d)) or SimpleNamespace(skipped=False, alerts=[]),
+        collect_daily=lambda d: (
+            calls.append(("collect", d))
+            or SimpleNamespace(skipped=False, alerts=[], series_bumped=[], late_changes=[], bars_failed=[])
+        ),
         month_ends_until=lambda d, n: [m for m in kw.get("month_ends", []) if m <= d.isoformat()][-n:],
-        finalize_day=lambda d: calls.append(("finalize", d)) or kw.get("finalize_failed", []),
+        bars_ready=lambda d: (kw.get("ready", True), "확정 봉 0개 / 직전 거래일 3,500개"),
     )
     app = SimpleNamespace(
         clock=FrozenClock(kw.get("now", datetime(2026, 9, 22, 18, 30, tzinfo=KST))),
@@ -35,7 +38,11 @@ def fake_app(session=None, trading_day=True, **kw):
         ),
         risk=SimpleNamespace(touch_heartbeat=lambda: calls.append(("touch", None))),
         decision=SimpleNamespace(
-            crud=SimpleNamespace(pending=lambda: kw.get("pending", []), picks=lambda i: ["000001"]),
+            crud=SimpleNamespace(
+                pending=lambda: kw.get("pending", []),
+                picks=lambda i: ["000001"],
+                real_decision=lambda asof, mode: kw.get("existing"),
+            ),
             decide_month_end=lambda d, m: calls.append(("decide", d)),
         ),
         trading=SimpleNamespace(
@@ -88,32 +95,39 @@ def test_sell_phase_and_buy_phase_split_the_execution(session):
     assert ("retry", None) in calls  # 보류 매도도 아침에 다시 본다
 
 
-def test_month_end_decide_runs_next_morning_on_finalized_bars(session):
-    """월말 판단은 다음 거래일 아침에 한다. 먼저 월말 봉을 확정값으로 다시 받고, 기준일은 월말 그대로.
-
-    당일 저녁 봉은 잠정값이라, 그걸로 고르면 나중에 재현한 결과와 달라진다(2026-09-23 확인).
-    """
-    days = ["2026-09-29", "2026-09-30", "2026-10-01"]
-    morning = datetime(2026, 10, 1, 7, 0, tzinfo=KST)
-    j, _, calls = fake_app(days=days, month_ends=["2026-09-30"], now=morning)
+def test_month_end_decide_only_on_a_month_end(session):
+    """20:40, 오늘이 월말 거래일일 때만. 20:10 수집이 받은 오늘 봉은 확정값이다."""
+    evening = datetime(2026, 9, 30, 20, 40, tzinfo=KST)
+    j, _, calls = fake_app(month_ends=["2026-08-31"], now=evening)
     j.run("판단", j.month_end_decide)
-    assert calls == [("finalize", date(2026, 9, 30)), ("decide", date(2026, 9, 30))]
-
-    j2, _, calls2 = fake_app(days=days, month_ends=["2026-08-31"], now=datetime(2026, 9, 30, 7, 0, tzinfo=KST))
+    assert calls == []
+    j2, _, calls2 = fake_app(month_ends=["2026-09-30"], now=evening)
     j2.run("판단", j2.month_end_decide)
-    assert calls2 == []  # 어제(9/29)는 월말이 아니다
+    assert calls2 == [("decide", date(2026, 9, 30))]
 
 
-def test_month_end_decide_warns_when_some_bars_stay_provisional(session):
-    days = ["2026-09-30", "2026-10-01"]
-    j, notes, calls = fake_app(
-        days=days,
-        month_ends=["2026-09-30"],
-        now=datetime(2026, 10, 1, 7, 0, tzinfo=KST),
-        finalize_failed=["000001: x"],
-    )
+def test_month_end_decide_waits_when_collection_did_not_finish(session):
+    """수집이 실패·지연되면 20:40에 판단하지 않고 알린다. 잠정·빠진 봉으로 고르면 재현이 안 된다."""
+    j, notes, calls = fake_app(month_ends=["2026-09-30"], now=datetime(2026, 9, 30, 20, 40, tzinfo=KST), ready=False)
     j.run("판단", j.month_end_decide)
-    assert ("decide", date(2026, 9, 30)) in calls and any("봉 확정 실패" in t for _, t in notes)
+    assert calls == [] and any("월말 판단 보류" in t for _, t in notes)
+
+
+def test_morning_retry_recollects_and_decides_a_missed_month_end(session):
+    days = ["2026-09-30", "2026-10-01"]
+    j, notes, calls = fake_app(days=days, month_ends=["2026-09-30"], now=datetime(2026, 10, 1, 7, 0, tzinfo=KST))
+    j.run("재시도", j.month_end_retry)
+    assert calls == [("collect", date(2026, 9, 30)), ("decide", date(2026, 9, 30))]
+    assert any("월말 판단이 없다" in t for _, t in notes)
+
+
+def test_morning_retry_does_nothing_when_the_decision_exists(session):
+    days = ["2026-09-30", "2026-10-01"]
+    j, _, calls = fake_app(
+        days=days, month_ends=["2026-09-30"], now=datetime(2026, 10, 1, 7, 0, tzinfo=KST), existing=object()
+    )
+    j.run("재시도", j.month_end_retry)
+    assert calls == []
 
 
 def test_backup_copies_the_database_and_drops_old_ones(tmp_path, session):
@@ -138,11 +152,22 @@ def test_scheduler_registers_every_job_in_the_table(session):
     j, _, _ = fake_app()
     s = build_scheduler(j.app, j)
     ids = {job.id for job in s.get_jobs()}
-    assert ids == {"prepare", "sell", "buy", "cancel", "evening", "decide", "report", "backup", "heartbeat"}
+    assert ids == {
+        "retry_decide",
+        "prepare",
+        "sell",
+        "buy",
+        "cancel",
+        "evening",
+        "decide",
+        "report",
+        "backup",
+        "heartbeat",
+    }
     trig = {job.id: str(job.trigger) for job in s.get_jobs()}
     assert "hour='8'" in trig["sell"] and "minute='40'" in trig["sell"]  # 장 시작 전 동시호가
-    assert "hour='18'" in trig["evening"] and "minute='30'" in trig["evening"]
-    assert "hour='7'" in trig["decide"] and "minute='0'" in trig["decide"]  # 다음 날 아침, 확정 봉으로
+    assert "hour='20'" in trig["evening"] and "minute='10'" in trig["evening"]  # 당일 봉은 20:00에 확정
+    assert "hour='20'" in trig["decide"] and "minute='40'" in trig["decide"]
     assert str(s.get_job("evening").trigger.timezone) == "Asia/Seoul"  # 시각은 한국 시간
 
 

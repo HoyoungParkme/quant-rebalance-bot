@@ -15,6 +15,8 @@ from app.domains.marketdata.models import (
     TradingCalendar,
 )
 
+FINAL_FROM = "T20:00"  # 봉 확정 시각. collected_at(한국 시간 ISO)이 "거래일T20:00" 이상이면 확정
+
 
 class MarketDataCrud:
     def __init__(self, session: Session) -> None:
@@ -142,31 +144,53 @@ class MarketDataCrud:
         )
         return self.s.scalar(stmt)
 
-    def last_final_bar(self, instrument_id: int, series_no: int) -> DailyBar | None:
-        """확정된 마지막 봉. 그 거래일보다 뒤에 받은 봉만 확정이다.
+    def final_bars(self, instrument_id: int, series_no: int, n: int = 2) -> list[DailyBar]:
+        """확정된 최근 봉 n개(최신 먼저). 그 거래일 20:00 이후에 받은 봉이 확정이다.
 
-        같은 날 받은 봉은 장이 끝난 뒤라도 잠정값이다. 증권사 당일 봉은 저녁까지 바뀐다
-        (2026-09-23 18:30에 받은 값과 19:44에 받은 값이 달랐다).
+        증권사 당일 봉은 대체거래소 애프터마켓이 끝나는 20:00까지 바뀐다. 2026-09-23에 18:30·19:44
+        값은 달랐고 20:05·20:35·21:30·다음 날 07:06 값은 8종목 모두 같았다.
         """
         stmt = (
             select(DailyBar)
             .where(
                 DailyBar.instrument_id == instrument_id,
                 DailyBar.series_no == series_no,
-                func.substr(DailyBar.collected_at, 1, 10) > DailyBar.trade_date,
+                DailyBar.collected_at >= DailyBar.trade_date.concat(FINAL_FROM),
             )
             .order_by(DailyBar.trade_date.desc())
-            .limit(1)
+            .limit(n)
         )
-        return self.s.scalar(stmt)
+        return list(self.s.scalars(stmt))
+
+    def final_bar_count(self, day: str) -> int:
+        return int(
+            self.s.scalar(
+                select(func.count())
+                .select_from(DailyBar)
+                .where(DailyBar.trade_date == day, DailyBar.collected_at >= day + FINAL_FROM)
+            )
+            or 0
+        )
+
+    def bar_count(self, day: str) -> int:
+        return int(self.s.scalar(select(func.count()).select_from(DailyBar).where(DailyBar.trade_date == day)) or 0)
 
     def provisional_bars(self, instrument_id: int, series_no: int, frm: str) -> list[DailyBar]:
-        """frm 이후 잠정 봉(그 거래일 당일이나 그 전에 받은 봉)."""
+        """frm 이후 잠정 봉(그 거래일 20:00 전에 받은 봉)."""
         stmt = select(DailyBar).where(
             DailyBar.instrument_id == instrument_id,
             DailyBar.series_no == series_no,
             DailyBar.trade_date >= frm,
-            func.substr(DailyBar.collected_at, 1, 10) <= DailyBar.trade_date,
+            DailyBar.collected_at < DailyBar.trade_date.concat(FINAL_FROM),
+        )
+        return list(self.s.scalars(stmt))
+
+    def final_bars_after(self, instrument_id: int, series_no: int, after: str) -> list[DailyBar]:
+        stmt = select(DailyBar).where(
+            DailyBar.instrument_id == instrument_id,
+            DailyBar.series_no == series_no,
+            DailyBar.trade_date > after,
+            DailyBar.collected_at >= DailyBar.trade_date.concat(FINAL_FROM),
         )
         return list(self.s.scalars(stmt))
 

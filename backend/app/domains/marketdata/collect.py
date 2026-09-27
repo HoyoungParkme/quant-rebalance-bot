@@ -36,6 +36,7 @@ class CollectResult:
     status_changes: int = 0
     filings_added: int = 0
     series_bumped: list[str] = field(default_factory=list)
+    late_changes: list[str] = field(default_factory=list)  # 확정이라 본 봉이 뒤늦게 바뀐 것
     alerts: list[str] = field(default_factory=list)
 
 
@@ -50,6 +51,7 @@ class Collector:
     ) -> None:
         self.crud, self.broker, self.filings, self.clock = crud, broker, filings, clock
         self.held_codes = held_codes or set()
+        self.late_changes: list[str] = []
 
     # ----- 종목·상태 -----
     def sync_instruments(self, day: str) -> tuple[int, int]:
@@ -125,10 +127,12 @@ class Collector:
         last = self.crud.last_bar(inst.id)
         series = last.series_no if last else 1
         bumped = False
-        # 확정된 봉끼리만 비교한다. 거래일 당일에 받은 봉은 장 마감 뒤에도 잠정값이라 다음 날 값과
-        # 다르다. 그 차이를 수정주가로 보면 판을 올려 수백 종목 이력을 통째로 다시 받는다
+        # 확정된 봉끼리만, 그것도 가장 최근 확정 봉 하나 앞의 날로 비교한다. 진짜 수정주가는 과거 전체가
+        # 같은 비율로 바뀌므로 하루 앞에서도 잡힌다. 반면 "확정"이라 본 봉이 뒤늦게 바뀐 것(드물지만
+        # 확정 시각이 어긋난 날)은 가장 최근 하루에만 나타나 판을 올리지 않는다.
+        # 잠정 봉을 비교에 쓰면 전 종목을 수정주가로 오판해 이력을 통째로 다시 받는다
         # (2026-09-22 장중 값, 2026-09-23 저녁 값 — 두 번 겪었다)
-        ref = self.crud.last_final_bar(inst.id, series) if last is not None else None
+        ref = self._reference_bar(inst.id, series) if last is not None else None
         if ref is not None:
             hit = next((b for b in bars if b.date == ref.trade_date), None)
             if hit is not None and hit.close != ref.close and hit.close > 0:
@@ -139,7 +143,32 @@ class Collector:
         rows = [self._to_row(inst.id, b, series, now_iso) for b in bars if b.date not in have]
         self.crud.add_bars(rows)
         self._settle_provisional(inst, bars, series, now_iso)
+        if not bumped and ref is not None:
+            self._catch_late_changes(inst, bars, series, ref.trade_date, now_iso)
         return len(rows), bumped
+
+    def _reference_bar(self, instrument_id: int, series: int):
+        """수정주가 비교 기준: 가장 최근 확정 봉 하나 앞. 확정 봉이 하나뿐이면(갓 상장) 비교하지 않는다.
+
+        하나뿐인 봉으로 비교하면 그 봉이 뒤늦게 바뀐 것을 수정주가로 오판한다(리뷰 지적).
+        """
+        finals = self.crud.final_bars(instrument_id, series, 2)
+        return finals[1] if len(finals) == 2 else None
+
+    def _catch_late_changes(self, inst: Instrument, bars: list[Bar], series: int, after: str, now_iso: str) -> None:
+        """확정이라 본 봉이 뒤늦게 바뀌었으면 고치고 기록한다. 20:00 확정 규칙을 감시하는 장치다.
+
+        하루 이틀이면 우연이지만 매일 여러 종목이면 확정 시각이 틀렸다는 뜻이다(저녁 알림으로 보인다).
+        """
+        fresh = {b.date: b for b in bars}
+        for row in self.crud.final_bars_after(inst.id, series, after):
+            f = fresh.get(row.trade_date)
+            if f is None or (f.close == row.close and f.volume == row.volume):
+                continue
+            self.late_changes.append(f"{inst.code} {row.trade_date} {row.close}→{f.close}")
+            row.open, row.high, row.low, row.close = f.open, f.high, f.low, f.close
+            row.volume, row.amount, row.traded = f.volume, f.amount, int(f.volume > 0)
+            row.collected_at = now_iso
 
     def _settle_provisional(self, inst: Instrument, bars: list[Bar], series: int, now_iso: str) -> None:
         """잠정 봉을 새로 받은 값으로 고친다.

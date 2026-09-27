@@ -104,24 +104,42 @@ class Jobs:
             self.app.ops.notify("error", f"장 마감. 미체결 {n}건 취소")
 
     def evening(self) -> None:
-        """18:30. 수집 → 대조 → 평가액 → 요약 (QBOT-SCN-001 S1)."""
+        """20:10. 수집 → 대조 → 평가액 → 요약 (QBOT-SCN-001 S1). 당일 봉이 확정되는 20:00 뒤에 돈다."""
         d = self._today()
         res = self.app.md.collect_daily(d)
         if res.skipped:
             return
         for msg in res.alerts:
             self.app.ops.notify("keyword", msg)
+        if res.bars_failed:
+            self.app.ops.notify("error", f"일봉 수집 실패 {len(res.bars_failed)}종목: {', '.join(res.bars_failed[:5])}")
+        if res.series_bumped:
+            self.app.ops.notify(
+                "error", f"수정주가 새 판 {len(res.series_bumped)}종목: {', '.join(res.series_bumped[:10])}"
+            )
+        if res.late_changes:  # 20:00 확정 규칙이 틀렸다는 신호. 매일 여러 건이면 수집 시각을 늦춘다
+            head = ", ".join(res.late_changes[:5])
+            self.app.ops.notify("error", f"확정 뒤 바뀐 봉 {len(res.late_changes)}건: {head}")
         self.app.trading.reconcile()
         self.app.valuation.record(d)
         self.app.session.commit()
         self.app.ops.notify("summary", self.app.reporting.daily_summary(d))
 
     def month_end_decide(self) -> None:
-        """07:00. 어제가 월말 거래일이면 그 봉을 확정값으로 다시 받고 다음 달 종목을 정한다 (UC-A2).
+        """20:40. 오늘이 월말 거래일이면 다음 달 종목을 정한다 (UC-A2).
 
-        월말 당일 저녁에 판단하지 않는다. 증권사 당일 봉은 장 마감 뒤에도 저녁까지 바뀌어서,
-        그 값으로 고르면 나중에 확정 종가로 재현했을 때 다른 종목이 나온다(관문의 선정 일치 100%).
-        기준일은 그대로 월말이다. 공시도 기준일 전날까지만 읽으므로 입력은 저녁 판단과 같다.
+        20:10 수집이 받은 오늘 봉은 확정값이다(당일 봉은 20:00까지 바뀐다, QBOT-INFRA-001 C10).
+        수집이 실패했거나 덜 끝났으면 판단하지 않는다 — 다음 날 07:00 month_end_retry가 다시 한다.
+        """
+        d = self._today()
+        if d.isoformat() not in self.app.md.month_ends_until(d, 1):
+            return
+        self._decide_if_ready(d)
+
+    def month_end_retry(self) -> None:
+        """07:00. 어제가 월말인데 판단이 없으면(수집 실패·지연) 그날을 다시 받고 판단한다.
+
+        판단이 한 번 빠지면 그달 리밸런싱이 통째로 사라진다. 저녁 판단의 안전망이다.
         """
         d = self._today()
         prev = self.app.md.crud.calendar_between(
@@ -132,11 +150,18 @@ class Jobs:
         asof = date.fromisoformat(prev[-1])
         if prev[-1] not in self.app.md.month_ends_until(asof, 1):
             return
-        failed = self.app.md.finalize_day(asof)
-        if failed:
-            self.app.ops.notify(
-                "error", f"{asof} 봉 확정 실패 {len(failed)}종목(잠정값으로 판단): {', '.join(failed[:5])}"
-            )
+        if self.app.decision.crud.real_decision(prev[-1], self.app.settings.mode) is not None:
+            return
+        self.app.ops.notify("error", f"{asof} 월말 판단이 없다. 그날 봉을 다시 받고 판단한다")
+        self.app.md.collect_daily(asof)
+        self.app.session.commit()
+        self._decide_if_ready(asof)
+
+    def _decide_if_ready(self, asof: date) -> None:
+        ok, detail = self.app.md.bars_ready(asof)
+        if not ok:
+            self.app.ops.notify("error", f"월말 판단 보류: {detail}. 수집이 덜 끝났다")
+            return
         self.app.decision.decide_month_end(asof, self.app.settings.mode)
 
     def monthly_report(self) -> None:
@@ -153,7 +178,7 @@ class Jobs:
         self.app.ops.notify("summary", self.app.reporting.describe_monthly(row))
 
     def backup(self) -> None:
-        """19:30. 데이터베이스를 복사해 둔다. 판단·주문 기록은 잃으면 복구할 수 없다."""
+        """21:00. 데이터베이스를 복사해 둔다. 판단·주문 기록은 잃으면 복구할 수 없다."""
         db = Path(self.app.settings.db_path)
         if not db.exists():
             return
@@ -192,14 +217,15 @@ def build_scheduler(app, jobs: Jobs | None = None) -> BackgroundScheduler:
         executors={"default": ThreadPoolExecutor(1)},  # 작업끼리도 겹치지 않게 한 줄로 돈다
     )
     plan = [
-        ("decide", 7, 0, lambda: j.run("월말 판단", j.month_end_decide)),
+        ("retry_decide", 7, 0, lambda: j.run("월말 판단 재시도", j.month_end_retry)),
         ("prepare", 8, 20, lambda: j.run("주문 준비", j.prepare)),
         ("sell", 8, 40, lambda: j.run("장 시작 전 매도", j.sell_phase)),
         ("buy", 9, 5, lambda: j.run("매수", j.buy_phase)),
         ("cancel", 15, 40, lambda: j.run("미체결 취소", j.cancel_open)),
-        ("evening", 18, 30, lambda: j.run("저녁 수집", j.evening, trading_only=False)),
+        ("evening", 20, 10, lambda: j.run("저녁 수집", j.evening, trading_only=False)),
+        ("decide", 20, 40, lambda: j.run("월말 판단", j.month_end_decide)),
         ("report", 19, 0, lambda: j.run("월간 보고", j.monthly_report)),
-        ("backup", 19, 30, lambda: j.run("백업", j.backup, trading_only=False)),
+        ("backup", 21, 0, lambda: j.run("백업", j.backup, trading_only=False)),
     ]
     for name, hour, minute, fn in plan:
         s.add_job(fn, CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone=KST), id=name)

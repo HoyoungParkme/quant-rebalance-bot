@@ -216,7 +216,7 @@ def test_a_real_adjustment_still_bumps(session):
     m.collect_daily(date(2025, 5, 30))
     # 다음 거래일. 지난 날들의 값이 절반으로 바뀌었다(액면분할)
     b.days.append(CalendarDay("2025-06-02", True))
-    b.bars["000001"] = [bar("2025-05-29", 500), bar("2025-05-30", 501), bar("2025-06-02", 502)]
+    b.bars["000001"] = [bar("2025-05-28", 500), bar("2025-05-29", 500), bar("2025-05-30", 501), bar("2025-06-02", 502)]
     res = m.collect_daily(date(2025, 6, 2))
     assert "000001" in res.series_bumped
     assert 2 in {r.series_no for r in session.scalars(select(DailyBar)).all()}
@@ -261,36 +261,60 @@ def test_evening_bar_that_changes_by_next_day_is_settled_not_a_split(session):
     assert row.close == 990 and row.series_no == 1 and row.collected_at.startswith("2025-06-02")  # 이제 확정
 
 
-def test_finalize_day_rewrites_the_provisional_month_end_bar(session):
-    """월말 판단 전 아침에 그 봉을 확정값으로 다시 받는다."""
+def test_bar_collected_after_20_is_final_and_a_late_change_is_reported_not_a_split(session):
+    """20:00 뒤에 받은 당일 봉은 확정이다. 그래도 다음 날 값이 다르면 판을 올리지 않고 고친 뒤 알린다.
+
+    진짜 수정주가는 과거 전체가 바뀌므로 하루 앞 날짜에서 잡힌다(가장 최근 확정 봉 하나로 판단하지 않는다).
+    """
     b = base_broker()
-    evening = MarketDataService(
+    MarketDataService(
         session,
         broker=b,
         filings=FakeFilings(),
-        clock=FrozenClock(datetime(2025, 5, 30, 18, 30)),
+        clock=FrozenClock(datetime(2025, 5, 30, 20, 10)),
         held_codes_fn=lambda: set(),
-    )
-    evening.collect_daily(date(2025, 5, 30))
-    b.bars["000001"][-1] = bar("2025-05-30", 777)
-    b.index["KOSPI"]["2025-05-30"] = 2555.0
-    morning = MarketDataService(
+    ).collect_daily(date(2025, 5, 30))
+    b.days.append(CalendarDay("2025-06-02", True))
+    b.bars["000001"] = [
+        bar("2025-05-28", 1000),
+        bar("2025-05-29", 1001),
+        bar("2025-05-30", 990),
+        bar("2025-06-02", 995),
+    ]
+    res = MarketDataService(
         session,
         broker=b,
         filings=FakeFilings(),
-        clock=FrozenClock(datetime(2025, 6, 2, 7, 40)),
+        clock=FrozenClock(datetime(2025, 6, 2, 20, 10)),
         held_codes_fn=lambda: set(),
-    )
-    assert morning.finalize_day(date(2025, 5, 30)) == []
+    ).collect_daily(date(2025, 6, 2))
+    assert res.series_bumped == [] and res.late_changes == ["000001 2025-05-30 1002→990"]
     inst = session.scalars(select(Instrument).where(Instrument.code == "000001")).one()
     row = session.scalars(
         select(DailyBar).where(DailyBar.instrument_id == inst.id, DailyBar.trade_date == "2025-05-30")
     ).one()
-    assert row.close == 777 and row.series_no == 1
-    kospi = session.scalars(
-        select(IndexLevel).where(IndexLevel.index_name == "KOSPI", IndexLevel.date == "2025-05-30")
-    ).one()
-    assert kospi.close == 2555.0
+    assert row.close == 990
+
+
+def test_split_is_caught_one_day_back_from_the_latest_final_bar(session):
+    b = base_broker()
+    MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 20, 10)),
+        held_codes_fn=lambda: set(),
+    ).collect_daily(date(2025, 5, 30))
+    b.days.append(CalendarDay("2025-06-02", True))
+    b.bars["000001"] = [bar("2025-05-28", 500), bar("2025-05-29", 500), bar("2025-05-30", 501), bar("2025-06-02", 502)]
+    res = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 6, 2, 20, 10)),
+        held_codes_fn=lambda: set(),
+    ).collect_daily(date(2025, 6, 2))
+    assert res.series_bumped == ["000001"]
 
 
 def test_backfill_resume_still_detects_a_split_after_a_provisional_evening(session, tmp_path):
@@ -315,3 +339,48 @@ def test_backfill_resume_still_detects_a_split_after_a_provisional_evening(sessi
     m.backfill(date(2025, 5, 1), ["bars"])
     inst = session.scalars(select(Instrument).where(Instrument.code == "000001")).one()
     assert 2 in set(session.scalars(select(DailyBar.series_no).where(DailyBar.instrument_id == inst.id)))
+
+
+def test_a_new_listing_with_one_final_bar_is_not_compared(session):
+    """확정 봉이 하나뿐인 종목(갓 상장)은 비교하지 않는다. 그 봉이 뒤늦게 바뀐 것을 분할로 보면 안 된다."""
+    b = base_broker(days=("2025-05-30",))
+    MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 20, 10)),
+        held_codes_fn=lambda: set(),
+    ).collect_daily(date(2025, 5, 30))
+    b.days.append(CalendarDay("2025-06-02", True))
+    b.bars["000001"] = [bar("2025-05-30", 700), bar("2025-06-02", 705)]
+    res = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 6, 2, 20, 10)),
+        held_codes_fn=lambda: set(),
+    ).collect_daily(date(2025, 6, 2))
+    assert res.series_bumped == []
+
+
+def test_bars_ready_needs_final_bars_for_most_instruments(session):
+    """20:00 전에 받은 봉뿐이면 준비되지 않았다. 20:00 뒤에 받으면 준비됐다."""
+    b = base_broker()
+    early = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 18, 30)),
+        held_codes_fn=lambda: set(),
+    )
+    early.collect_daily(date(2025, 5, 30))
+    assert early.bars_ready(date(2025, 5, 30))[0] is False
+    late = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 20, 10)),
+        held_codes_fn=lambda: set(),
+    )
+    late.collect_daily(date(2025, 5, 30))
+    assert late.bars_ready(date(2025, 5, 30))[0] is True
