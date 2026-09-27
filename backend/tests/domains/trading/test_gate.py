@@ -83,3 +83,13 @@ def test_sell_still_blocked_by_halt(session):
 def test_zero_equity_rejects_buy(session):
     state(session)
     assert OrderGate(session).check(buy(), snap(total=0)).reason == "no_equity"
+
+
+def test_index_etf_uses_its_own_cap_not_the_single_stock_cap(session):
+    """지수 상장지수펀드는 목표 20%다. 종목 상한 15%를 걸면 첫 매수부터 거부된다(2026-09-27 발견)."""
+    state(session)
+    g = OrderGate(session, max_position_weight=0.15, index_etf="069500", index_cap_fn=lambda: 0.25)
+    etf = OrderRequest("069500", "buy", 1, 200_000)
+    assert g.check(etf, snap()).allowed  # 20%
+    assert g.check(OrderRequest("069500", "buy", 1, 260_000), snap()).reason == "concentration"  # 26% > 25%
+    assert g.check(OrderRequest(CODE, "buy", 1, 200_000), snap()).reason == "concentration"  # 일반 종목은 15%

@@ -26,10 +26,21 @@ class GateVerdict:
 class OrderGate:
     """주문 하나가 나가도 되는지 판정한다 (QBOT-MS-001 OrderGate.check). 판정할 수 없으면 거부다."""
 
-    def __init__(self, session, max_position_weight: float = 0.15, daily_order_cap_multiple: float = 2.0) -> None:
+    def __init__(
+        self,
+        session,
+        max_position_weight: float = 0.15,
+        daily_order_cap_multiple: float = 2.0,
+        index_etf: str | None = None,
+        index_cap_fn: Callable[[], float] | None = None,
+    ) -> None:
         self.crud = RiskCrud(session)
         self.max_position_weight = max_position_weight
         self.daily_order_cap_multiple = daily_order_cap_multiple
+        # 지수 상장지수펀드는 한 종목이 아니라 200종목 묶음이다. 종목 상한(15%)을 걸면 목표 비중 20%(R14)를
+        # 영영 못 산다. 대신 목표 비중 + 조정 허용폭(5%p)을 상한으로 쓴다
+        self.index_etf = index_etf
+        self.index_cap_fn = index_cap_fn or (lambda: 0.0)
 
     def check(self, req: OrderRequest, snap: EquitySnapshot) -> GateVerdict:
         s = self.crud.state_or_none()
@@ -47,7 +58,8 @@ class OrderGate:
                 return GateVerdict(False, "drawdown")
             if snap.total <= 0:
                 return GateVerdict(False, "no_equity")
-            if (snap.holdings.get(req.code, 0) + amount) / snap.total > self.max_position_weight:
+            cap = self.index_cap_fn() if req.code == self.index_etf else self.max_position_weight
+            if (snap.holdings.get(req.code, 0) + amount) / snap.total > cap:
                 return GateVerdict(False, "concentration")
         if snap.today_order_amount + amount > snap.total * self.daily_order_cap_multiple:
             return GateVerdict(False, "daily_cap")

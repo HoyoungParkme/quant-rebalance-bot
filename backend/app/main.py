@@ -89,6 +89,19 @@ class App:
     lock: threading.RLock
 
 
+INDEX_BAND = 0.05  # 지수 부분은 목표 비중에서 5%p 넘게 벗어날 때만 맞춘다 (QBOT-PRD-001 R14)
+
+
+def index_cap(crud: DecisionCrud, today) -> float:
+    """지수 상장지수펀드 한 종목의 비중 상한 = 목표 비중 + 조정 허용폭. 설정이 없으면 0(사지 않음).
+
+    한계: 오늘의 설정을 본다. 판단은 그 판단의 설정으로 실행되므로, 지수 비중을 바꾸는 설정이 생기면
+    바뀐 직후 옛 판단의 지수 매수가 거부될 수 있다. 지금은 비중을 바꾸는 경로가 없다(재점검 승인은 그대로 복사).
+    """
+    cfg = crud.config_effective(today.isoformat())
+    return (cfg.index_weight + INDEX_BAND) if cfg and cfg.index_weight > 0 else 0.0
+
+
 def build(settings: Settings | None = None, session: Session | None = None) -> App:
     settings = settings or load_settings()
     if session is None:
@@ -146,7 +159,13 @@ def build(settings: Settings | None = None, session: Session | None = None) -> A
     trading = TradingService(
         session,
         order_broker,
-        OrderGate(session, settings.max_position_weight, settings.daily_order_cap_multiple),
+        OrderGate(
+            session,
+            settings.max_position_weight,
+            settings.daily_order_cap_multiple,
+            index_etf=INDEX_ETF_CODE,
+            index_cap_fn=lambda: index_cap(DecisionCrud(session), clock.today()),
+        ),
         clock,
         md.instrument_ids,
         mode=settings.mode,
