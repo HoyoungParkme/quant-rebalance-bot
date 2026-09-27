@@ -359,6 +359,18 @@ class OrderExecutor:
         return n
 
 
+BUY_MARGIN = 0.02  # 시장가 매수는 체결가가 현재가보다 높을 수 있다. 수수료와 함께 예수금에서 이만큼 남긴다
+
+
+def _affordable(cash: int, price: int) -> int:
+    """예수금으로 살 수 있는 수량. 수수료·체결 오차 몫을 남긴다.
+
+    현금 전부를 현재가로 나누면 시가가 조금만 올라도 예수금이 모자라 거부되고, 그 거부는 주문 오류로
+    세어져 실전 전환 관문(오류 0건)을 영영 못 넘는다(2026-09-28 전수 시험: 26개월에 2~4건).
+    """
+    return int(cash // (price * (1 + FEE_RATE + BUY_MARGIN))) if price > 0 else 0
+
+
 class TradingService:
     """판단 실행, 주문 하나, 계좌 대조 (QBOT-MS-001 TradingService.execute)."""
 
@@ -452,6 +464,10 @@ class TradingService:
             raise OrdersBlocked("정지 상태다. 재개한 뒤에 실행한다")
         if state.get("orders_blocked"):
             raise OrdersBlocked("주문이 멈춰 있다. reconcile_accept 로 정리해야 실행할 수 있다")
+        # 09:05 매수 단계는 08:40에 걸어 둔 매도의 체결을 **대조보다 먼저** 기록한다. 계좌는 이미 팔렸는데
+        # 기록은 아직 보유라서, 대조를 먼저 하면 불일치로 주문 전체가 멈춘다(2026-09-28 전수 시험에서 발견:
+        # 매도가 있는 첫 달부터 2년 내내 멈췄다)
+        sold = self.confirm_open_orders(decision.id) if phase == "buy" else []
         rec = self.reconcile()
         if rec.result == "mismatch":
             raise OrdersBlocked("계좌가 기록과 다르다. 확인 뒤 reconcile_accept 로 정리해야 주문이 나간다")
@@ -459,6 +475,7 @@ class TradingService:
             raise Precondition("판단 계획을 읽을 수 없다")
         plan = self.plan_fn(decision)
         res = ExecutionResult()
+        res.sold = sold
         decision.status = "running"
         self.s.commit()
 
@@ -490,7 +507,6 @@ class TradingService:
             return res  # 체결은 09시에 확인한다. 판단은 running으로 둔다
 
         if phase == "buy":
-            res.sold = self.confirm_open_orders(decision.id)  # 동시호가에 걸어 둔 매도 확인
             held = self._held_by_code()  # 팔린 만큼 보유가 줄었다
 
         bal = self.broker.balance()
@@ -508,7 +524,7 @@ class TradingService:
             if price <= 0:
                 res.skipped[code] = "no_price"
                 continue
-            qty = min(budget, cash) // price
+            qty = min(budget // price, _affordable(cash, price))
             if qty <= 0:
                 res.skipped[code] = "cash"
                 continue
@@ -518,7 +534,8 @@ class TradingService:
                 "buy",
                 lambda c=code, q=int(qty), p=price: self.executor.send(decision.id, ids[c], c, "buy", q, p),
             ):
-                cash -= int(qty) * price
+                # 실제로 나가는 돈은 체결가·수수료만큼 더 크다. 남긴 몫까지 빼야 뒤 주문(특히 지수)이 모자라지 않는다
+                cash -= int(int(qty) * price * (1 + FEE_RATE + BUY_MARGIN))
 
         if plan.index_weight > 0 and plan.index_rebalance:
             self._rebalance_index(decision.id, ids, bal, plan, res, cash)
@@ -603,7 +620,7 @@ class TradingService:
         have = bal.holdings[code].value if code in bal.holdings else 0
         gap = int(bal.total_equity * plan.index_weight) - have
         if gap > 0:
-            qty = min(gap, cash) // price
+            qty = min(gap // price, _affordable(cash, price))
             if qty > 0:
                 self._try(
                     res,

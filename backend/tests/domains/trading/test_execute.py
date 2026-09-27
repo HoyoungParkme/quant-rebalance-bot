@@ -5,13 +5,14 @@ from __future__ import annotations
 import pytest
 
 from app.core.errors import InvalidState, OrdersBlocked
-from tests.domains.trading.fakes import PRICE
+from tests.domains.trading.fakes import PRICE, FakeOrderBroker
 from tests.domains.trading.helpers import build
 
 
 def test_sells_what_is_not_a_target_then_buys_with_that_money(session):
     """핵심: 매수 예산은 판단 시점 평가액이 아니라 매도가 반영된 실제 계좌에서 나온다."""
-    w = build(session, holdings={"000001": 2}, cash=0, picks=["000002", "000003"], n_holdings=2)
+    # 예수금은 수수료·체결 오차 몫(2%)을 남기고 쓴다. 딱 맞는 현금으로는 사지 않는다
+    w = build(session, holdings={"000001": 2}, cash=PRICE // 10, picks=["000002", "000003"], n_holdings=2)
     res = w.svc.execute(w.decision)
     assert res.sold == ["000001"] and res.bought == ["000002", "000003"]
     assert [r.side for r in w.broker.placed] == ["sell", "buy", "buy"]  # 매도가 먼저다
@@ -20,7 +21,7 @@ def test_sells_what_is_not_a_target_then_buys_with_that_money(session):
 
 
 def test_keeps_what_is_still_a_target(session):
-    w = build(session, holdings={"000002": 1}, cash=PRICE, picks=["000002", "000003"], n_holdings=2)
+    w = build(session, holdings={"000002": 1}, cash=PRICE + PRICE // 10, picks=["000002", "000003"], n_holdings=2)
     res = w.svc.execute(w.decision)
     assert res.sold == [] and res.bought == ["000003"]  # 000002는 그대로 둔다
 
@@ -161,3 +162,38 @@ def test_one_failing_retry_does_not_block_the_others(session):
     w.svc.executor.send = flaky
     out = w.svc.retry_held_sells()
     assert [o.idem_key for o in out] == ["1:000002:sell"] and w.qty("000002") == 0
+
+
+def test_cash_bound_buy_leaves_room_for_fees_and_slippage(session):
+    """현금을 현재가로 딱 나누면 시가가 조금만 올라도 예수금 부족으로 거부되고, 그것이 주문 오류로 세어진다."""
+    w = build(session, holdings={}, cash=PRICE * 3, picks=["000002"], n_holdings=1)
+    res = w.svc.execute(w.decision)
+    assert res.bought == ["000002"] and w.qty("000002") == 2  # 3주가 아니라 2주: 2% 몫을 남긴다
+
+
+def test_buy_phase_records_the_preopen_sells_before_reconciling(session):
+    """08:40 매도는 09시 동시호가에 체결된다. 09:05에는 계좌가 이미 0주인데 기록은 아직 보유다.
+
+    대조를 먼저 하면 불일치로 주문이 전부 멈춘다(2026-09-28 전수 시험: 매도가 있는 첫 달부터 2년 내내).
+    체결을 먼저 기록하고 대조해야 한다.
+    """
+    from dataclasses import replace
+
+    broker = FakeOrderBroker(cash=PRICE // 10, fill_plan=["none"])  # 08:40에는 아직 체결 전
+    w = build(session, holdings={"000001": 2}, picks=["000002"], n_holdings=1, broker=broker)
+    w.svc.execute(w.decision, phase="sell")
+    # 09:00 동시호가 체결: 계좌에서 주식이 빠지고 대금이 들어온다
+    broker.orders[0] = replace(broker.orders[0], filled_qty=2, avg_price=PRICE)
+    broker.holdings.pop("000001")
+    broker.cash += 2 * PRICE
+    res = w.svc.execute(w.decision, phase="buy")
+    assert res.sold == ["000001"] and res.bought == ["000002"]
+    assert w.qty("000001") == 0
+
+
+def test_reserve_carries_over_to_the_next_order(session):
+    """앞 주문이 남긴 몫을 현금 계산에서 빼야 뒤 주문이 예수금 부족으로 거부되지 않는다."""
+    w = build(session, holdings={}, cash=PRICE * 2, picks=["000002", "000003"], n_holdings=1)
+    res = w.svc.execute(w.decision)
+    # 첫 종목 1주(2% 몫 포함 약 1.02주값) 뒤 남은 현금은 약 0.98주값 → 두 번째는 사지 않는다
+    assert res.bought == ["000002"] and res.skipped.get("000003") == "cash"
