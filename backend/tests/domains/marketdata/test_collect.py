@@ -104,13 +104,33 @@ def test_filings_and_quarter_derivation(session):
     assert kinds[("2024-12-31", "annual")] == 120 and kinds[("2024-12-31", "quarter")] == 30  # 120 - 90
 
 
-def test_filing_numbers_must_belong_to_that_filing(session):
+def test_original_filing_takes_the_corrected_numbers_at_its_own_date(session):
+    """정정이 있으면 재무 API는 정정본 숫자만 준다. 원본은 원본 접수일에 넣고 숫자는 정정본에서 가져온다.
+
+    예전에는 "다른 본의 숫자"라며 원본을 버려, 정정된 보고서는 정정일까지 재무가 없었다
+    (해마다 400~580사, 전수 시험 docs/research/11). 운영자 결정 2026-09-28.
+    """
     b = base_broker()
     f = FakeFilings()
-    f.filings = [FilingInfo("R1", "000001", "C1", "annual", "11011", "2024", "2025-05-30", "사업보고서 (2024.12)")]
-    f.fin[("C1", "2024", "11011")] = FinancialRows("R9", 1, {"operating_income": 1}, {})  # 다른 공시(정정본)의 숫자
+    f.filings = [
+        FilingInfo("20250530000001", "000001", "C1", "annual", "11011", "2024", "2025-05-30", "사업보고서 (2024.12)")
+    ]
+    f.fin[("C1", "2024", "11011")] = FinancialRows("20250801000009", 1, {"operating_income": 1}, {})  # 8월 정정본
     svc(session, b, f).collect_daily(date(2025, 5, 30))
-    assert session.scalar(select(func.count()).select_from(FinancialSnapshot)) == 0
+    filing = session.scalars(select(Filing)).one()
+    assert filing.rcept_date == "2025-05-30" and filing.numbers_rcept_no == "20250801000009"
+    assert session.scalar(select(func.count()).select_from(FinancialSnapshot)) == 1
+
+
+def test_numbers_from_an_earlier_version_are_not_used(session):
+    """재무 API가 아직 앞선 본의 숫자를 주면(이 정정이 반영 전) 넣지 않고 다음 수집을 기다린다."""
+    b = base_broker()
+    f = FakeFilings()
+    title = "[기재정정]사업보고서 (2024.12)"
+    f.filings = [FilingInfo("20250530000009", "000001", "C1", "correction", "11011", "2024", "2025-05-30", title)]
+    f.fin[("C1", "2024", "11011")] = FinancialRows("20250320000001", 1, {"operating_income": 1}, {})  # 원본 숫자
+    svc(session, b, f).collect_daily(date(2025, 5, 30))
+    assert session.scalar(select(func.count()).select_from(Filing)) == 0
 
 
 def test_non_trading_day_is_skipped(session):

@@ -213,12 +213,19 @@ class Collector:
                 continue
             self.crud.s.commit()  # 외부 호출은 트랜잭션 밖에서. 전자공시 한 번에 0.5초씩 잠그면 봇이 못 들어온다
             rows = None
+            numbers_from = None
             if fi.reprt_code and fi.year:
                 rows = self.filings.financials(fi.corp_code, fi.year, fi.reprt_code)
-                if rows is None or rows.rcept_no != fi.rcept_no:
-                    # 숫자가 아직 없거나(전자공시 반영 지연) 다른 본의 숫자면 공시도 넣지 않는다.
-                    # 다음 수집이 같은 기간을 다시 훑어 그때 넣는다 (있는 것으로 저장하면 영원히 빠진다)
+                if rows is None:
+                    # 숫자가 아직 없으면(전자공시 반영 지연) 공시도 넣지 않는다. 다음 수집이 다시 훑어 그때 넣는다
                     continue
+                if rows.rcept_no != fi.rcept_no:
+                    if rows.rcept_no < fi.rcept_no:
+                        continue  # 이 공시보다 앞선 본의 숫자다. 이 공시의 숫자가 아직 반영되지 않았다
+                    # 뒤에 정정이 나와 재무 API가 정정본 숫자만 준다. 원본은 원본 접수일에 넣고 숫자는 정정본에서
+                    # 가져온다(운영자 결정 2026-09-28). 안 그러면 정정된 보고서는 정정일까지 재무가 없는 것이 되어
+                    # 해마다 400~580사의 재무가 몇 달씩 늦게 들어왔다(전수 시험 docs/research/11)
+                    numbers_from = rows.rcept_no
             f = self.crud.add_filing(
                 Filing(
                     rcept_no=fi.rcept_no,
@@ -226,6 +233,7 @@ class Collector:
                     report_kind=fi.report_kind,
                     rcept_date=fi.rcept_date,
                     title=fi.title,
+                    numbers_rcept_no=numbers_from,
                     collected_at=now_iso,
                 )
             )

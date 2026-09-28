@@ -58,6 +58,8 @@ class Filing(IdCreated, Base):
     report_kind: Mapped[str] = mapped_column(String(12), nullable=False)
     rcept_date: Mapped[str] = mapped_column(String(10), nullable=False)
     corrects_rcept_no: Mapped[str | None] = mapped_column(String(14))
+    # 숫자를 가져온 공시. 정정이 있으면 재무 API가 정정본 숫자만 주므로 원본에 정정본 숫자를 넣는다. NULL이면 자기 숫자
+    numbers_rcept_no: Mapped[str | None] = mapped_column(String(14))
     title: Mapped[str] = mapped_column(String, nullable=False)
     collected_at: Mapped[str] = mapped_column(String(25), nullable=False)
 
