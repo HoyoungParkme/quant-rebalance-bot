@@ -237,15 +237,15 @@ class MarketDataCrud:
         )
         return self.s.scalar(stmt) > 0
 
-    def cumulative_q3_op(self, instrument_id: int, year: str, consolidated: int) -> int | None:
-        """3분기 보고서의 누적 영업이익. 4분기 = 연간 - 이것."""
+    def cumulative_q3_op(self, instrument_id: int, q3_end: str, consolidated: int) -> int | None:
+        """3분기 보고서의 누적 영업이익(q3_end는 3분기 말, 결산월 12월이면 YYYY-09-30). 4분기 = 연간 - 이것."""
         from app.domains.marketdata.models import FinancialSnapshot as FS
 
         stmt = (
             select(FS.operating_income)
             .where(
                 FS.instrument_id == instrument_id,
-                FS.period_end == f"{year}-09-30",
+                FS.period_end == q3_end,
                 FS.period_kind == "cum3q",
                 FS.consolidated == consolidated,
             )

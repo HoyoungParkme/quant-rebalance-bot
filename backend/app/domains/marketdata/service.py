@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import calendar
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
@@ -34,12 +35,13 @@ FIN_COLUMNS = [
 
 
 def _prev_year_period_end(period_end: str) -> str:
-    """1년 전 같은 결산기 종료일. 윤년 2월 29일은 28일로."""
+    """1년 전 같은 결산기 종료일(그 달 말일). 기간 끝은 늘 월말로 저장된다.
+
+    2025-02-28의 1년 전은 2024-02-29다. 날짜만 바꾸면 2024-02-28이 되어 2월 결산 회사의 성장률이 빈다.
+    """
     d = date.fromisoformat(period_end)
-    try:
-        return d.replace(year=d.year - 1).isoformat()
-    except ValueError:
-        return d.replace(year=d.year - 1, day=28).isoformat()
+    y = d.year - 1
+    return date(y, d.month, calendar.monthrange(y, d.month)[1]).isoformat()
 
 
 class MarketDataService:

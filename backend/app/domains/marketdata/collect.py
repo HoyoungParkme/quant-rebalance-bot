@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import calendar as _cal
 import csv
+import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.domains.marketdata.ports import Bar, BrokerPort, FilingInfo, FilingPort
 
 INDEX_NAMES = ("KOSPI", "KOSPI200", "KOSDAQ")
 ALERT_KEYWORDS = ("감사의견", "의견거절", "횡령", "배임", "거래정지", "상장폐지", "회생", "파산")
+LATE_CORRECTION_DAYS = 90  # 이보다 늦은 정정은 원본 날짜에 쓰지 않는다 (운영자 결정 2026-09-29)
 REPRT_PERIOD = {
     "11013": ("03-31", "quarter"),
     "11012": ("06-30", "quarter"),
@@ -222,6 +224,10 @@ class Collector:
                 if rows.rcept_no != fi.rcept_no:
                     if rows.rcept_no < fi.rcept_no:
                         continue  # 이 공시보다 앞선 본의 숫자다. 이 공시의 숫자가 아직 반영되지 않았다
+                    if _days_between(fi.rcept_no, rows.rcept_no) > LATE_CORRECTION_DAYS:
+                        # 원본 뒤 90일이 넘어 나온 정정은 순이익·자본을 바꾼 경우가 있었다(표본 11~13%, research/12).
+                        # 그 숫자를 원본 날짜에 쓰면 미래 정보다. 원본은 넣지 않고, 정정 공시가 자기 날짜에 들어간다
+                        continue
                     # 뒤에 정정이 나와 재무 API가 정정본 숫자만 준다. 원본은 원본 접수일에 넣고 숫자는 정정본에서
                     # 가져온다(운영자 결정 2026-09-28). 안 그러면 정정된 보고서는 정정일까지 재무가 없는 것이 되어
                     # 해마다 400~580사의 재무가 몇 달씩 늦게 들어왔다(전수 시험 docs/research/11)
@@ -248,8 +254,8 @@ class Collector:
         return added, alerts
 
     def _add_snapshots(self, inst: Instrument, f: Filing, fi: FilingInfo, rows) -> None:
-        mmdd, kind = REPRT_PERIOD[fi.reprt_code]
-        period_end = f"{fi.year}-{mmdd}"
+        kind = REPRT_PERIOD[fi.reprt_code][1]
+        period_end = _period_end(fi)
         v = rows.values
         if self.crud.snapshot_exists(f.id, period_end, kind, rows.consolidated):
             return
@@ -281,13 +287,13 @@ class Collector:
                 )
             )
         if fi.reprt_code == "11011" and v.get("operating_income") is not None:
-            q3 = self.crud.cumulative_q3_op(inst.id, fi.year, rows.consolidated)
+            q3 = self.crud.cumulative_q3_op(inst.id, _months_back(period_end, 3), rows.consolidated)
             if q3 is not None:
                 self.crud.add_snapshot(
                     FinancialSnapshot(
                         filing_id=f.id,
                         instrument_id=inst.id,
-                        period_end=f"{fi.year}-12-31",
+                        period_end=period_end,
                         period_kind="quarter",
                         consolidated=rows.consolidated,
                         operating_income=v["operating_income"] - q3,
@@ -349,3 +355,31 @@ class Collector:
             self.crud.add_bars(rows)
             n += len(rows)
         return n
+
+
+def _days_between(rcept_a: str, rcept_b: str) -> int:
+    """접수번호 앞 8자리(YYYYMMDD) 사이 일수."""
+    a, b = (date(int(x[:4]), int(x[4:6]), int(x[6:8])) for x in (rcept_a, rcept_b))
+    return (b - a).days
+
+
+def _period_end(fi: FilingInfo) -> str:
+    """보고서 기간 끝. 제목의 (YYYY.MM)을 따른다.
+
+    보고서 종류로 정하면(사업보고서 = 12-31) 결산월이 12월이 아닌 회사(59사)의 기간이 틀린다.
+    예: "사업보고서 (2022.09)"가 2022-12-31 연간으로 저장됐다(docs/research/12에서 발견).
+    """
+    m = re.search(r"\((\d{4})\.(\d{2})\)", fi.title or "")
+    if not m:
+        return f"{fi.year}-{REPRT_PERIOD[fi.reprt_code][0]}"
+    y, mo = int(m.group(1)), int(m.group(2))
+    return date(y, mo, _cal.monthrange(y, mo)[1]).isoformat()
+
+
+def _months_back(period_end: str, n: int) -> str:
+    """월말 날짜에서 n개월 앞 월말."""
+    d = date.fromisoformat(period_end)
+    y, mo = d.year, d.month - n
+    while mo <= 0:
+        y, mo = y - 1, mo + 12
+    return date(y, mo, _cal.monthrange(y, mo)[1]).isoformat()

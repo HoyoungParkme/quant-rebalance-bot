@@ -404,3 +404,32 @@ def test_bars_ready_needs_final_bars_for_most_instruments(session):
     )
     late.collect_daily(date(2025, 5, 30))
     assert late.bars_ready(date(2025, 5, 30))[0] is True
+
+
+def test_late_correction_is_not_used_at_the_original_date(session):
+    """원본 뒤 90일이 넘어 나온 정정은 순이익·자본을 바꾸기도 한다(docs/research/12). 원본 날짜에 쓰지 않는다."""
+    b = base_broker()
+    f = FakeFilings()
+    title = "사업보고서 (2024.12)"
+    f.filings = [FilingInfo("20250320000001", "000001", "C1", "annual", "11011", "2024", "2025-05-30", title)]
+    f.fin[("C1", "2024", "11011")] = FinancialRows("20250801000009", 1, {"operating_income": 1}, {})  # 134일 뒤 정정
+    svc(session, b, f).collect_daily(date(2025, 5, 30))
+    assert session.scalar(select(func.count()).select_from(Filing)) == 0
+
+
+def test_non_december_fiscal_year_uses_the_title_month(session):
+    """결산월이 9월인 회사의 사업보고서 (2024.09)는 2024-09-30 연간이다(예전에는 12-31로 저장됐다)."""
+    b = base_broker()
+    f = FakeFilings()
+    f.filings = [
+        FilingInfo("R3", "000001", "C1", "quarter", "11014", "2024", "2025-05-29", "분기보고서 (2024.06)"),
+        FilingInfo("R4", "000001", "C1", "annual", "11011", "2024", "2025-05-30", "사업보고서 (2024.09)"),
+    ]
+    f.fin[("C1", "2024", "11014")] = FinancialRows("R3", 1, {"operating_income": 30}, {"operating_income": 90})
+    f.fin[("C1", "2024", "11011")] = FinancialRows("R4", 1, {"operating_income": 120}, {})
+    svc(session, b, f).collect_daily(date(2025, 5, 30))
+    rows = {(s.period_end, s.period_kind): s.operating_income for s in session.scalars(select(FinancialSnapshot))}
+    assert rows[("2024-09-30", "annual")] == 120
+    assert rows[("2024-06-30", "cum3q")] == 90
+    assert rows[("2024-09-30", "quarter")] == 30  # 4분기 = 연간 120 - 3분기 누적 90
+    assert ("2024-12-31", "annual") not in rows

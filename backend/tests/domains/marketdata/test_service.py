@@ -228,3 +228,11 @@ def test_matches_research_selection_logic(session):
         assert got.loc[c, "operating_income"] == int(float(expect.loc[c, "op"]))
         assert got.loc[c, "net_income"] == int(float(expect.loc[c, "ni_use"]))
     assert not np.isnan(got.loc["005930", "op_annual_prev"])
+
+
+def test_prev_year_period_end_is_the_prior_month_end():
+    from app.domains.marketdata.service import _prev_year_period_end
+
+    assert _prev_year_period_end("2025-02-28") == "2024-02-29"  # 윤년 다음 해 2월 결산
+    assert _prev_year_period_end("2024-02-29") == "2023-02-28"
+    assert _prev_year_period_end("2025-12-31") == "2024-12-31"
