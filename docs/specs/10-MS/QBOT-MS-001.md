@@ -12,7 +12,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 시퀀스에 나오는 함수와, 검증 재현성이 걸린 순수 함수의 입력·처리·출력·예외를 정한다. 단순 조회는 간략형이다. 내부 타입(DTO)은 [[QBOT-DOM-002]]에 있는 이름을 쓴다.
 
-2026-09-22에 구현(슬라이스 A~F)에서 드러난 오류를 반영했다. 굵게 쓴 곳이 처음 명세와 달라진 부분이고, 대부분 "그대로 따르면 조용히 잘못되는" 것들이었다.
+2026-09-22에 구현(슬라이스 A~F)에서 드러난 오류를, 2026-09-23~29에 운용·전수 시험에서 드러난 오류와 운영자 결정(손절, 정정 공시 규칙)을 반영했다. 굵게 쓴 곳이 처음 명세와 달라진 부분이고, 대부분 "그대로 따르면 조용히 잘못되는" 것들이었다.
 
 ## 1. 함수 목록
 
@@ -30,6 +30,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 | OrderExecutor.send | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-3]] |
 | OrderExecutor.reconcile_unknown | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-5]] |
 | TradingService.execute | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-4]] |
+| TradingService.mark_stop_losses | 쓰기 | [[QBOT-SEQ-001#SEQ-1]] |
 | RiskService.record_valuation | 쓰기 | [[QBOT-SEQ-001#SEQ-1]] |
 | RiskService.gate_approve | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-6]] |
 
@@ -57,7 +58,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 2. `financial_snapshot`을 종목·`period_end`·`period_kind`로 묶고, 묶음마다 `rcept_date`가 가장 늦은 행(같으면 `rcept_no`가 큰 행) 하나를 남긴다
 3. `if consolidated 행과 별도 행이 둘 다 있음 → consolidated 우선 · else → 있는 것`
 4. 종목별 최신 연간·분기 행을 고른 **뒤에** `pit.asof - period_end > 500일`이면 버린다. 조회 단계에서 걸면 직전 연도 행까지 사라져 성장률을 계산할 수 없다
-5. 종목별로 최신 연간 행 1개와 **정확히 1년 전 같은 결산기** 행, 최신 분기 행과 **정확히 1년 전 같은 분기** 행을 골라 한 행으로 편다. 짝이 없으면 NaN으로 두어 성장률 계산에서 빠지게 한다
+5. 종목별로 최신 연간 행 1개와 **정확히 1년 전 같은 결산기** 행(그 달 말일 — 2월 결산은 윤년에 28·29일이 다르다), 최신 분기 행과 **정확히 1년 전 같은 분기** 행을 골라 한 행으로 편다. 짝이 없으면 NaN으로 두어 성장률 계산에서 빠지게 한다
 
 **출력** 종목 코드를 인덱스로, 컬럼 `revenue, operating_income, net_income, equity, op_annual_prev, op_q, op_q_prev, shares`
 
@@ -65,7 +66,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **호출하는 것** MarketDataCrud.filings_until, MarketDataCrud.snapshots_for
 
-**테스트 관점** 기준일 당일 접수된 공시가 결과에 없어야 한다. 정정 공시가 기준일 뒤에 접수됐으면 원본 값이 나와야 한다. 같은 결산 기간에 원본과 정정이 둘 다 기준일 전이면 정정 값이 나와야 한다.
+**테스트 관점** 기준일 당일 접수된 공시가 결과에 없어야 한다. 정정 공시가 기준일 뒤에 접수됐으면 원본 값이 나와야 한다. 같은 결산 기간에 원본과 정정이 둘 다 기준일 전이면 정정 값이 나와야 한다. 2025-02-28 결산의 1년 전은 2024-02-29여야 한다.
 
 근거: [[QBOT-UC-001#UC-S1]] · [[QBOT-DOM-003#filing]]
 
@@ -86,28 +87,30 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **시그니처** `collect_daily(d: date) -> CollectResult`
 
-**입력** `d`. 보통 오늘.
+**입력** `d`. 보통 오늘. **20:00 뒤에 불러야 당일 봉이 확정값이다**([[QBOT-INFRA-001#C10]]).
 
 **처리**
 1. `if trading_calendar에 d가 없음 → 증권사 calendar()로 이번 달을 받아 저장`
 2. `if d가 거래일 아님 → CollectResult(skipped=True) 반환`
 3. 증권사 `instrument_list()`(마스터 파일 1회 내려받기)로 종목 목록·지정 상태·상장주식수를 한 번에 받아 새 종목은 추가, 폐지 종목은 `delisted_on` 채움, 코드 변경은 `prev_code`로 잇는다. **종목마다 현재가를 부르지 않는다**
-4. 종목마다 `daily_bars(code, 마지막 저장일, d)`를 받는다. 초당 호출 한도는 어댑터가 지킨다. 실패한 종목은 `failed`에 담고 계속한다
-5. 종목마다 저장된 어제 종가와 이번 응답의 어제 종가를 비교한다. `if 다름 → series_no + 1 로 그 종목의 과거 전체를 다시 받아 추가`
-6. `index_close`로 코스피·코스피200 종가를 저장한다
-7. 전자공시 `list_filings(d - 14일, d)`로 공시를 받고(반영이 며칠 늦는다), 각각 `financials(rcept_no)`로 수치를 받아 filing과 snapshot을 추가한다. **수치가 아직 없으면 공시도 넣지 않는다** — 넣어 두면 다음 수집이 건너뛰어 영원히 빠진다
-8. 보유 종목의 공시 제목에 돌발 키워드가 있으면 `alerts`에 담는다
-9. **단계마다·종목마다 커밋한다.** 3,500종목을 한 트랜잭션으로 잡으면 증권사를 부르는 몇 분 동안 적재도 메신저 명령도 전부 DB 잠금에 막힌다
+4. 종목마다 `daily_bars(code, 시작일, d)`를 받는다. 시작일은 **가장 최근 확정 봉 하나 앞의 날**이다(확정 = 거래일 20:00 이후에 받은 봉). 초당 호출 한도는 어댑터가 지킨다. 실패한 종목은 `failed`에 담고 계속한다
+5. 수정주가 판정: **확정 봉끼리만**, 가장 최근 확정 봉 하나 앞 날짜의 저장 종가와 응답 종가를 비교한다. `if 다름 → series_no + 1 로 그 종목의 과거 전체를 다시 받아 추가`. 확정 봉이 하나뿐(갓 상장)이면 비교하지 않는다. 잠정 봉(20:00 전에 받은 봉)을 비교에 쓰면 전 종목을 수정주가로 오판해 이력을 통째로 다시 받는다(2026-09-22·23 두 번 겪음)
+6. 받은 구간의 잠정 봉을 새 값으로 덮고 받은 시각을 갱신한다(확정이 된다). 확정이라 본 봉이 바뀌었으면 판을 올리지 않고 고친 뒤 `late_changes`에 담는다 — 20:00 확정 규칙의 감시 장치다
+7. `index_closes`로 코스피·코스피200·코스닥 종가를 마지막 받은 날부터(최소 30일) 저장한다. 지수 조회는 한 페이지 50개이므로 페이지 크기를 가정하지 않는다
+8. 전자공시 `list_filings(d - 14일, d)`로 공시를 받고, 각각 `financials(corp, year, reprt)`로 수치를 받아 filing과 snapshot을 추가한다. **수치가 아직 없으면 공시도 넣지 않는다** — 넣어 두면 다음 수집이 건너뛰어 영원히 빠진다. **정정 규칙**: 재무 API가 이 공시보다 뒤의 정정본 숫자를 주면 `if 정정 접수일 - 원본 접수일 <= 90일 → 원본을 원본 접수일에 넣고 숫자는 정정본에서, filing.numbers_rcept_no에 정정 번호 기록 · else → 원본은 넣지 않는다(정정 공시가 자기 날짜에 들어간다)`. 앞선 본의 숫자를 주면(이 공시가 반영 전) 넣지 않고 다음 수집을 기다린다
+9. 재무 기간(`period_end`)은 보고서 종류가 아니라 **제목의 (YYYY.MM)**으로 정한다. 사업보고서 (2024.09)는 2024-09-30 연간이다. 4분기 파생(연간 − 3분기 누적)은 결산월 기준 3개월 앞 누적을 쓴다
+10. 보유 종목의 공시 제목에 돌발 키워드가 있으면 `alerts`에 담는다
+11. **단계마다·종목마다 커밋한다.** 3,500종목을 한 트랜잭션으로 잡으면 증권사를 부르는 몇 분 동안 적재도 메신저 명령도 전부 DB 잠금에 막힌다
 
-**출력** `CollectResult(skipped, bars_ok, bars_failed, filings_added, series_bumped, alerts)`
+**출력** `CollectResult(skipped, bars_ok, bars_failed, filings_added, series_bumped, late_changes, alerts)`
 
 **예외** | 증권사 접속 자체가 안 됨 | BrokerUnavailable. 호출자가 알림 후 다음 실행에서 채움 |
 
 **호출하는 것** BrokerPort 전부, FilingPort 전부, MarketDataCrud
 
-**테스트 관점** 가짜 BrokerPort로 어제 종가가 다른 응답을 주면 `series_bumped`에 그 종목이 들어가고 옛 판 행이 남아 있어야 한다.
+**테스트 관점** 20:00 전에 받은 당일 봉이 다음 날 값과 달라도 `series_bumped`에 들어가면 안 된다(잠정값). 하루 앞 날짜의 값이 바뀐 것은 들어가야 한다(진짜 수정주가). 원본 뒤 134일 정정의 숫자는 원본 날짜에 붙지 않아야 한다. 9월 결산 회사의 사업보고서 (2024.09)가 2024-12-31로 저장되면 안 된다.
 
-근거: [[QBOT-UC-001#UC-A1]] · [[QBOT-INFRA-001]] 7장
+근거: [[QBOT-UC-001#UC-A1]] · [[QBOT-INFRA-001]] 7장 · [[QBOT-PRD-001#R2]]
 
 #### Scorer.score 지표와 점수
 
@@ -149,29 +152,29 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **시그니처** `decide_month_end(asof: date, mode: str) -> Decision`
 
-**입력** `asof`는 월말 거래일. `mode`는 paper 또는 live.
+**입력** `asof`는 월말 거래일. `mode`는 paper 또는 live. 스케줄은 월말 20:40에 부르고, 그날 확정 봉이 직전 거래일의 95% 미만이면 부르지 않고 알린 뒤 다음 거래일 07:00에 다시 받아 부른다.
 
 **처리**
 1. `if 같은 asof·mode의 실제 판단이 이미 있음 → 그것을 돌려주고 끝`
-2. `pit = PointInTime(asof)`, `cfg = 현재 StrategyConfig`
+2. `pit = PointInTime(asof)`, `cfg = asof에 유효한 StrategyConfig`
 3. `universe(pit, cfg.filters)`, `bars(pit, 252)`, `financials(pit)`, `statuses_on(pit)`
 4. `mcap = 종가 × shares_outstanding`. 지금은 **현재 주식 수**를 쓴다(과거 주식 수를 보관하지 않는다. 3장 미결)
 5. `scored = Scorer.score(...)`
 6. `equity = trading.equity_snapshot().total`, `budget = equity × (1 - cfg.index_weight) / cfg.n_holdings`
 7. `excluded = statuses_on의 managed·warning·danger·halted·liquidation 종목`
 8. `sel = Scorer.select(scored, budget, cfg.n_holdings, excluded, 종가)`
-9. `if cfg.trend_filter and 코스피 월말 종가가 "있는 만큼(최대 10개) 월말 종가의 평균"보다 높지 않으면 → sel.picked = [], cash_switch = 1` (검증 simulate.py 15행. 10개월이 안 차도 있는 만큼으로 판정한다)
+9. `if cfg.trend_filter`: 코스피 월말 종가를 기준 달로 끝나는 **연속 10개월** 가져온다. `if 연속 10개월이 아님 → DataNotReady(판단 거부, 알림)`. 짧거나 구멍 난 평균으로 조용히 판단하면 규칙이 바뀐 것과 같다(2026-09-23 지수 이력이 두 달치뿐이던 사고). `if 마지막 종가 <= 10개월 평균 → sel.picked = [], cash_switch = 1`
 10. `if cfg.index_weight > 0 and |현재 지수 비중 - cfg.index_weight| > 0.05 → index_rebalance = 1`
 11. Decision(pending)과 Score(top60, selected 표시)를 한 트랜잭션으로 저장한다. `code_version`은 git 커밋 해시
 12. 매도 예정(보유 - picked)과 매수 예정(picked - 보유)을 알림으로 보낸다
 
 **출력** 저장된 Decision
 
-**예외** | 오늘 시세 수집이 실패한 상태 | DataNotReady. 판단하지 않고 알림 | | 후보가 0개 | 예외 아님. picked 비고 알림 |
+**예외** | 오늘 시세 수집이 실패한 상태 | DataNotReady. 판단하지 않고 알림 | | 지수 월말 종가가 연속 10개월이 아님 | DataNotReady | | 후보가 0개 | 예외 아님. picked 비고 알림 |
 
-**호출하는 것** MarketDataService 4개, Scorer 2개, TradingService.equity_snapshot, DecisionCrud, OpsService.notify
+**호출하는 것** MarketDataService 5개, Scorer 2개, TradingService.equity_snapshot, DecisionCrud, OpsService.notify
 
-**테스트 관점** 같은 `asof`로 두 번 부르면 두 번째는 저장하지 않고 첫 결과를 돌려준다. `replay`와 같은 `pit`로 돌린 결과가 `picked`까지 같아야 한다.
+**테스트 관점** 같은 `asof`로 두 번 부르면 두 번째는 저장하지 않고 첫 결과를 돌려준다. `replay`와 같은 `pit`로 돌린 결과가 `picked`까지 같아야 한다. 지수 이력에 빈 달이 있으면 거부해야 한다.
 
 근거: [[QBOT-SEQ-001#SEQ-2]] · [[QBOT-UC-001#UC-A2]]
 
@@ -203,7 +206,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 4. `if state.mode == live and state.gate_record_id is None → 거부(no_gate)`
 5. `if req.side == buy and state.buy_suspended → 거부(drawdown)`
 6. `if req.side == buy and snapshot.total <= 0 → 거부(no_equity)`. 평가액을 모르면 비중을 판정할 수 없다
-7. `if req.side == buy and (보유 평가액[code] + req.qty × req.price) / snapshot.total > 0.15 → 거부(concentration)`
+7. `if req.side == buy and (보유 평가액[code] + req.qty × req.price) / snapshot.total > cap → 거부(concentration)`. **`cap`은 개별 종목 0.15, 지수 상장지수펀드는 `index_weight + 0.05`**(설정에 지수 비중이 없으면 0). 지수 펀드에 0.15를 걸면 목표 20%를 영영 못 산다(2026-09-27 첫 주문 전에 발견)
 8. `if snapshot.today_order_amount + req.qty × req.price > snapshot.total × 2 → 거부(daily_cap)`
 9. `if req.side == buy and state.first_month_cap is not None and 이번 달 매수 누계 + req.qty × req.price > state.first_month_cap → 거부(first_month)`
 10. 허용
@@ -212,9 +215,9 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **예외** | `bot_state` 행이 없음 | 거부(no_state). 예외를 올리지 않는다. 행을 **만들지도 않는다** — 관문이 상태를 만들면 "상태가 없다"를 영영 못 잡는다 |
 
-**테스트 관점** 조건 9개 각각을 켠 입력에서 그 이유로 거부돼야 한다. 매도는 5·6·7·9(매수에만 걸리는 것)를 건너뛴다.
+**테스트 관점** 조건 9개 각각을 켠 입력에서 그 이유로 거부돼야 한다. 매도는 5·6·7·9(매수에만 걸리는 것)를 건너뛴다. 지수 ETF 20% 매수는 허용되고 26%는 거부돼야 한다.
 
-근거: [[QBOT-UC-001#UC-S6]] · [[QBOT-PRD-001#R9]]
+근거: [[QBOT-UC-001#UC-S6]] · [[QBOT-PRD-001#R9]] · [[QBOT-PRD-001#R14]]
 
 #### OrderExecutor.send 주문 하나 보내기
 
@@ -230,7 +233,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 5. `verdict = gate.check(req, trading.equity_snapshot())`. `if not allowed → 행을 rejected로(있으면 그 행을 고쳐서) 남기고 반환`
 6. `INSERT status=planned` (UNIQUE 충돌이면 2단계로 돌아간다)
 7. `UPDATE status=unknown` 하고 **커밋한다**. 여기서 죽어도 흔적이 남아야 재시작 때 확인할 수 있다
-8. `no = broker.place_order(req)`. 이 호출은 재시도하지 않는다
+8. `no = broker.place_order(req)`. 이 호출은 재시도하지 않는다. **모의투자**는 주문별 체결 내역을 주지 않으므로 어댑터가 보내기 전 잔고를 기억해 뒀다가 잔고 차이로 체결을 재구성한다(매수가 = 매입원가 증가분 ÷ 수량, 매도가 = 그날 매도 평균가)
 9. `UPDATE broker_order_no=no, status=sent`
 10. `wait=False`면 여기서 끝낸다(체결 확인은 09:05에). 아니면 제한 시간 동안 `order_status(no)`를 폴링한다. 증권사는 누적 체결과 누적 평균가만 주므로 **늘어난 수량과 그 구간 가격만** `fill`로 넣는다(키는 `{증권사주문번호}:{누적수량}`). `if 전량 체결 → filled · elif 제한 시간 초과 → cancel_order로 **취소를 확인한 뒤에만** 재주문(확인 못 하면 살아 있는 주문 위에 또 내는 것이라 두 번 산다). 재시도는 남은 수량을 시장가로, 전송 전에 `unknown`으로 커밋하고 `attempt`를 올린다 · else → partial/cancelled`
 
@@ -242,7 +245,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **테스트 관점** 7단계 뒤 예외를 강제로 내면 행이 `unknown`으로 남아야 한다. 같은 인자로 두 번 부르면 증권사 호출은 한 번이어야 한다. 취소가 확인되지 않으면 재주문하지 않아야 한다.
 
-근거: [[QBOT-SEQ-001#SEQ-3]] · [[QBOT-INFRA-001#C8]]
+근거: [[QBOT-SEQ-001#SEQ-3]] · [[QBOT-INFRA-001#C8]] · [[QBOT-INFRA-001]] 5.1
 
 #### OrderExecutor.reconcile_unknown 미확정 주문 확정
 
@@ -266,23 +269,48 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **처리**
 1. `if decision.status not in (pending, running, partial) → 예외 InvalidState`. 이어서 봇 상태를 본다: `if halted or orders_blocked → 예외 OrdersBlocked`
-2. `rec = reconcile()`. `if rec.result == mismatch → 예외 OrdersBlocked`
-3. `UPDATE decision.status=running`
-4. `targets = decision의 selected 종목 + (index_weight > 0이면 지수 ETF)`
-5. 매도 목록 = 보유 - targets. 각각 `if 오늘 거래정지 → status=held 저장 · else → executor.send(sell)`. **일부만 체결된 매도의 남은 수량도 보류로 남긴다**(다음 시도 번호의 행으로). 남겨 두지 않으면 같은 멱등 키가 최종 상태라 그 달 내내 못 판다
-6. `bal = broker.balance()`, `budget = bal.total_equity × (1 - cfg.index_weight) / cfg.n_holdings`. **매도 뒤에 다시 조회한다** — 예산은 판단 시점 평가액이 아니라 매도 대금이 들어온 실제 계좌에서 나온다
-7. 매수 목록 = targets - 보유, 점수 순. 각각 `qty = floor(min(budget, bal.cash) / 현재가)`. `if qty == 0 → 건너뜀 · else → executor.send(buy)`, 성공 시 `bal.cash` 차감
-8. `if held·오류·관문 거부가 하나라도 있음 → status=partial · else → status=done`. **전부 거부당한 판단을 done으로 닫으면 안 된다** — done은 다시 실행할 수 없어 그 달 리밸런싱이 통째로 사라진다
-9. 체결 요약을 알림으로 보낸다
-10. `phase`로 나눠 부를 수 있다: `sell`(08:40 동시호가에 매도만, 기다리지 않음), `buy`(09:05 체결 확인 후 매수), `all`(한 번에). 스케줄이 [[QBOT-INFRA-001]] 8.1 표대로 나눠 부른다
+2. **`if phase == buy → confirm_open_orders(decision)` 를 먼저 한다.** 08:40 매도는 09시 동시호가에 체결돼 09:05에는 계좌가 이미 팔린 상태다. 기록을 먼저 맞추지 않으면 다음 단계의 대조가 불일치로 봇을 멈춘다(2026-09-28 전수 시험: 매도가 있는 첫 달부터 2년 내내 멈춤)
+3. `rec = reconcile()`. `if rec.result == mismatch → 예외 OrdersBlocked`
+4. `UPDATE decision.status=running`
+5. `targets = decision의 selected 종목 + (index_weight > 0이면 지수 ETF)`
+6. 매도 목록 = (보유 - targets) ∪ **손절 예정 종목**(`position.stop_loss_on`이 있는 보유). 각각 `if 오늘 거래정지 → status=held 저장 · else → executor.send(sell, wait = phase != sell)`. **일부만 체결된 매도의 남은 수량도 보류로 남긴다**(다음 시도 번호의 행으로). 남겨 두지 않으면 같은 멱등 키가 최종 상태라 그 달 내내 못 판다. `phase == sell`이면 여기서 끝낸다(판단은 running)
+7. `bal = broker.balance()`, `budget = bal.total_equity × (1 - cfg.index_weight) / cfg.n_holdings`. **매도 뒤에 다시 조회한다** — 예산은 판단 시점 평가액이 아니라 매도 대금이 들어온 실제 계좌에서 나온다
+8. 매수 목록 = targets - 보유, 점수 순. **이 판단 뒤에 손절 표시된 종목(`stop_loss_on > decision.asof`)은 뺀다** — 그 자리는 월말까지 현금이다. 각각 `qty = min(floor(budget / 현재가), floor(cash / (현재가 × (1 + 수수료율 + 0.02))))`. **현금이 한도일 때는 수수료·체결 오차 몫 2%를 남긴다** — 딱 나누면 시가가 조금만 올라도 예수금 부족으로 거부되고 그것이 주문 오류로 세어져 관문(오류 0건)을 못 넘는다. `if qty == 0 → 건너뜀(cash) · else → executor.send(buy)`, 성공 시 `cash -= qty × 현재가 × (1 + 수수료율 + 0.02)`(남긴 몫까지 빼야 뒤 주문, 특히 지수가 모자라지 않는다)
+9. `if index_weight > 0 and decision.index_rebalance → 지수 ETF를 목표 비중에 맞춘다`(모자라면 같은 여유 몫 규칙으로 매수, 넘치면 매도)
+10. `if held·오류·관문 거부가 하나라도 있음 → status=partial · else → status=done`. **전부 거부당한 판단을 done으로 닫으면 안 된다** — done은 다시 실행할 수 없어 그 달 리밸런싱이 통째로 사라진다
+11. 체결 요약을 알림으로 보낸다
+12. `phase`로 나눠 부를 수 있다: `sell`(08:40 동시호가에 매도만, 기다리지 않음), `buy`(09:05 체결 확인 후 매수), `all`(한 번에). 스케줄이 [[QBOT-INFRA-001]] 8.1 표대로 나눠 부른다
 
 **출력** `ExecutionResult(sold, bought, held, skipped, errors)`
 
 **예외** | 관문 거부로 매수가 모두 막힘 | 예외 아님. skipped에 사유. 다만 status는 partial |
 
-**테스트 관점** 매도 후 `balance()`가 매도 대금이 반영된 값을 주는 가짜 BrokerPort로, 매수 수량이 그 현금 기준으로 계산되는지 본다.
+**테스트 관점** 매도 후 `balance()`가 매도 대금이 반영된 값을 주는 가짜 BrokerPort로, 매수 수량이 그 현금 기준으로 계산되는지 본다. 08:40에 보낸 매도가 09:00에 체결된 뒤 09:05 `buy`를 부르면 OrdersBlocked 없이 매수까지 가야 한다. 현금이 3주값이면 2주만 사야 한다. 손절 표시된 종목은 목표에 있어도 팔리고, 같은 판단에서 다시 사지 않아야 한다.
 
-근거: [[QBOT-SEQ-001#SEQ-4]] · [[QBOT-UC-001#UC-A3]]
+근거: [[QBOT-SEQ-001#SEQ-4]] · [[QBOT-UC-001#UC-A3]] · [[QBOT-UC-001#UC-A7]]
+
+#### TradingService.mark_stop_losses 손절 표시
+
+**시그니처** `mark_stop_losses(d: date) -> list[StopLoss]`
+
+**입력** `d`는 오늘(거래일). 저녁 수집·평가액 기록 뒤에 부른다. 그날 확정 종가가 저장돼 있어야 한다.
+
+**처리**
+1. `positions = 보유 수량 > 0 인 종목`. 지수 상장지수펀드는 뺀다(고정 비중, 손절 대상 아님)
+2. 종목마다 `close = 그날 확정 종가(daily_bar, 최신 판)`, `loss = close / position.avg_cost - 1`
+3. `if loss <= -0.15 and position.stop_loss_on is None → position.stop_loss_on = d`, 결과 목록에 `StopLoss(code, avg_cost, close, loss)` 추가
+4. 이미 표시된 종목은 다시 표시하지 않고 결과에도 넣지 않는다(알림 중복 방지). 표시는 그 종목이 전량 팔려 수량이 0이 될 때까지 남고, 다음 판단이 그 종목을 다시 사면 새 매입에는 표시가 없다
+5. 커밋
+
+**출력** 새로 표시한 종목 목록. 호출자(스케줄)가 "내일 손절 매도 예정: 종목·평단·종가·손실률"로 알린다
+
+**예외** | 그날 종가가 없는 보유 종목 | 건너뛴다(거래정지 등). 예외를 올리지 않는다 |
+
+**호출하는 것** TradingCrud.positions·upsert_position, MarketDataCrud.closes_on
+
+**테스트 관점** 평단 10,000원 종목의 종가가 8,500원이면 표시되고 8,501원이면 안 된다. 지수 ETF는 -20%라도 표시되지 않는다. 같은 날 두 번 불러도 두 번째는 빈 목록이어야 한다. 표시된 종목은 다음 `execute(phase=sell)`에서 팔리고 같은 판단의 `buy`에서 되사지 않아야 한다.
+
+근거: [[QBOT-SEQ-001#SEQ-1]] · [[QBOT-UC-001#UC-A7]] · [[QBOT-PRD-001#R6]]
 
 #### RiskService.record_valuation 일별 평가액
 
@@ -326,5 +354,8 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 - [x] `record_valuation`의 입출금 감지 → 사람이 계좌 대조에서 밝힌 금액만 센다(`reconciliation.external_flow`). 증권사 입출금 내역 조회에 기대지 않는다
 - [x] `OrderExecutor.send`의 재시도 가격 폭 → v1은 "남은 수량 시장가 재주문". 호가 2단계는 호가 조회가 필요해 v1 범위를 넘는다
-- [ ] `Scorer.score`의 시가총액에 쓸 주식 수. 지금은 **현재 주식 수**를 과거 월말에도 그대로 쓴다(과거 주식 수를 보관하지 않아서). 과거 재현의 EP·SP·TURN20에 영향이 있다. 상장주식수 이력을 남길지 결정 필요
+- [ ] `Scorer.score`의 시가총액에 쓸 주식 수. 지금은 **현재 주식 수**를 과거 월말에도 그대로 쓴다. 연구에서 순이익÷주당이익으로 연도별 주식 수를 88~90% 추정할 수 있었다 — 봇에 넣을지 결정 필요
 - [ ] 실전 첫 달 뒤 "체결 오차 1%p 이내면 나머지 투입"([[QBOT-PRD-001#R8]])을 실행할 함수가 없다. 첫 달 상한을 푸는 경로가 필요하다
+- [ ] 관문의 "월 수익 차이" 모의 계산값(`ideal_return`)에 손절 규칙을 같은 방식으로 적용해야 한다. 안 그러면 손절할 때마다 관문이 실패한다
+- [ ] 모의 체결 재구성의 "보내기 전 잔고"를 DB에 남길지. 지금은 프로세스 메모리라 다른 프로세스가 확인할 수 없다(2026-09-29 실주문에서 겪음)
+- [ ] 조회 호출의 시간 초과 재시도([[QBOT-UC-001#UC-S7]] 1b1). 지금은 재시도 없이 바로 실패한다
