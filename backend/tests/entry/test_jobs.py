@@ -193,7 +193,10 @@ def test_heartbeat_touches_state_hourly_but_messages_once_a_day(session):
 
 
 def test_month_end_decide_holds_when_the_refresh_mostly_fails(session):
-    """21:00 재수집이 통째로 실패하면 20:10 잠정값으로 판단하지 않는다. 판단이 생기면 07:00 안전망이 건너뛰기 때문이다."""
+    """21:00 재수집이 통째로 실패하면 20:10 잠정값으로 판단하지 않는다.
+
+    판단이 한 번 생기면 07:00 안전망이 건너뛰기 때문이다.
+    """
     evening = datetime(2026, 9, 30, 21, 0, tzinfo=KST)
     j, notes, calls = fake_app(
         month_ends=["2026-09-30"], now=evening, refreshed=(0, [f"{i:06d}: 시간 초과" for i in range(200)])
