@@ -264,6 +264,31 @@ class MarketDataService:
         finals = self.crud.final_bars(instrument_id, last.series_no, 2)
         return (finals[-1] if finals else last).trade_date
 
+    def refresh_bars(self, d: date) -> tuple[int, list[str]]:
+        """그날 봉을 전 종목 다시 받아 확정한다. 월말 판단 직전에 부른다 (QBOT-INFRA-001 C10).
+
+        당일 봉은 20:00 뒤에도 얼마간 바뀌고 굳는 시각이 날마다 다르다(2026-09-28은 20:10 값이 다음 날 60% 달랐다).
+        잠정값으로 고르면 재현과 달라져 관문의 선정 일치를 못 채운다. 반환: (바뀐 봉 수, 실패 종목).
+        """
+        day = d.isoformat()
+        col = self._collector()
+        now_iso = self.clock.now().isoformat(timespec="seconds")
+        before = len(col.late_changes)
+        failed: list[str] = []
+        for k, inst in enumerate(self.crud.instruments(), 1):
+            if inst.delisted_on is not None:
+                continue
+            try:
+                col.collect_bars(inst, self._bars_from(inst.id, d), day, now_iso)
+            except Exception as e:  # noqa: BLE001 - 한 종목 실패가 판단을 막으면 안 된다. 그 종목은 이전 값으로 남는다
+                failed.append(f"{inst.code}: {e}")
+                continue
+            if k % 50 == 0:
+                self.crud.s.commit()
+        col.collect_index(day, day)
+        self.crud.s.commit()
+        return len(col.late_changes) - before, failed
+
     def bars_ready(self, d: date, min_ratio: float = 0.95) -> tuple[bool, str]:
         """그날 확정 봉이 충분히 모였는가. 월말 판단 전에 본다.
 

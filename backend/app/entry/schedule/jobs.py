@@ -20,6 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.core.clock import KST
 
 BACKUP_KEEP_DAYS = 30
+REFRESH_FAIL_LIMIT = 150  # 판단 전 재수집 실패가 이보다 많으면(약 5%) 판단을 보류한다
 
 
 @dataclass
@@ -126,13 +127,25 @@ class Jobs:
         self.app.ops.notify("summary", self.app.reporting.daily_summary(d))
 
     def month_end_decide(self) -> None:
-        """20:40. 오늘이 월말 거래일이면 다음 달 종목을 정한다 (UC-A2).
+        """21:00. 오늘이 월말 거래일이면 당일 봉을 다시 받아 확정한 뒤 다음 달 종목을 정한다 (UC-A2).
 
-        20:10 수집이 받은 오늘 봉은 확정값이다(당일 봉은 20:00까지 바뀐다, QBOT-INFRA-001 C10).
+        20:10 수집이 받은 당일 봉은 날에 따라 아직 바뀐다(QBOT-INFRA-001 C10). 판단 직전에 한 번 더 받는다.
         수집이 실패했거나 덜 끝났으면 판단하지 않는다 — 다음 날 07:00 month_end_retry가 다시 한다.
         """
         d = self._today()
         if d.isoformat() not in self.app.md.month_ends_until(d, 1):
+            return
+        changed, failed = self.app.md.refresh_bars(d)
+        self.app.session.commit()
+        if changed or failed:
+            self.app.ops.notify(
+                "error" if failed else "summary",
+                f"{d} 판단 전 재수집: 20:10 뒤 바뀐 봉 {changed}건, 실패 {len(failed)}종목",
+            )
+        if len(failed) > REFRESH_FAIL_LIMIT:
+            # 재수집이 통째로 실패했으면(증권사 장애) 20:10 잠정값으로 판단하지 않는다. 판단이 생기면 07:00 안전망도
+            # 건너뛰므로, 여기서 보류해야 내일 아침에 다시 받고 판단한다 (리뷰 지적)
+            self.app.ops.notify("error", f"월말 판단 보류: 재수집 실패 {len(failed)}종목. 07:00에 다시 받는다")
             return
         self._decide_if_ready(d)
 
@@ -178,7 +191,7 @@ class Jobs:
         self.app.ops.notify("summary", self.app.reporting.describe_monthly(row))
 
     def backup(self) -> None:
-        """21:00. 데이터베이스를 복사해 둔다. 판단·주문 기록은 잃으면 복구할 수 없다."""
+        """21:20. 데이터베이스를 복사해 둔다. 판단·주문 기록은 잃으면 복구할 수 없다."""
         db = Path(self.app.settings.db_path)
         if not db.exists():
             return
@@ -223,9 +236,9 @@ def build_scheduler(app, jobs: Jobs | None = None) -> BackgroundScheduler:
         ("buy", 9, 5, lambda: j.run("매수", j.buy_phase)),
         ("cancel", 15, 40, lambda: j.run("미체결 취소", j.cancel_open)),
         ("evening", 20, 10, lambda: j.run("저녁 수집", j.evening, trading_only=False)),
-        ("decide", 20, 40, lambda: j.run("월말 판단", j.month_end_decide)),
+        ("decide", 21, 0, lambda: j.run("월말 판단", j.month_end_decide)),
         ("report", 19, 0, lambda: j.run("월간 보고", j.monthly_report)),
-        ("backup", 21, 0, lambda: j.run("백업", j.backup, trading_only=False)),
+        ("backup", 21, 20, lambda: j.run("백업", j.backup, trading_only=False)),
     ]
     for name, hour, minute, fn in plan:
         s.add_job(fn, CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone=KST), id=name)

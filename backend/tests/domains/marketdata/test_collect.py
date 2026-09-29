@@ -433,3 +433,31 @@ def test_non_december_fiscal_year_uses_the_title_month(session):
     assert rows[("2024-06-30", "cum3q")] == 90
     assert rows[("2024-09-30", "quarter")] == 30  # 4분기 = 연간 120 - 3분기 누적 90
     assert ("2024-12-31", "annual") not in rows
+
+
+def test_refresh_bars_rewrites_todays_bar_and_counts_the_change(session):
+    """월말 판단 직전에 당일 봉을 다시 받는다. 20:10 값이 바뀌었으면 고치고 센다."""
+    b = base_broker()
+    m = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 20, 10)),
+        held_codes_fn=lambda: set(),
+    )
+    m.collect_daily(date(2025, 5, 30))
+    b.bars["000001"][-1] = bar("2025-05-30", 1003)  # 20:10 뒤에 값이 바뀌었다
+    later = MarketDataService(
+        session,
+        broker=b,
+        filings=FakeFilings(),
+        clock=FrozenClock(datetime(2025, 5, 30, 21, 0)),
+        held_codes_fn=lambda: set(),
+    )
+    changed, failed = later.refresh_bars(date(2025, 5, 30))
+    assert changed == 1 and failed == []
+    inst = session.scalars(select(Instrument).where(Instrument.code == "000001")).one()
+    row = session.scalars(
+        select(DailyBar).where(DailyBar.instrument_id == inst.id, DailyBar.trade_date == "2025-05-30")
+    ).one()
+    assert row.close == 1003
