@@ -14,6 +14,8 @@ SQLite 파일 하나에 들어가는 테이블과 컬럼, 키, 인덱스를 정�
 
 공통 규칙: 기본 키는 `id INTEGER`. 시각은 ISO 8601 문자열(한국 시간). 금액은 원 단위 정수. 날짜는 `YYYY-MM-DD` 문자열. `created_at`은 모든 테이블에 있고 표에서는 생략한다.
 
+2026-09-23~29 운용에서 더해진 칸: `filing.numbers_rcept_no`, `position.stop_loss_on`. 마이그레이션은 Alembic으로 남긴다.
+
 ## 1. 개념 식별
 
 [[QBOT-DOM-001]]의 개념 21개가 테이블 21개다. 추가 테이블은 `reconciliation_diff` 하나다. StrategyConfig의 지표 목록은 JSON 컬럼으로 두고 별도 테이블로 풀지 않는다. 지표 7개가 행으로 필요한 조회가 없기 때문이다.
@@ -78,9 +80,11 @@ erDiagram
 | volume | INTEGER | NOT NULL | |
 | amount | INTEGER | | 거래대금 |
 | traded | INTEGER | NOT NULL | 0/1. 거래 여부 |
-| collected_at | TEXT | NOT NULL | |
+| collected_at | TEXT | NOT NULL | 받은 시각. **`trade_date`의 20:00 이후면 확정 봉, 그 전이면 잠정 봉** |
 
 판 번호가 올라가도 옛 행은 지우지 않는다([[QBOT-INFRA-001#C10]]). 어느 판을 쓸지는 **판 번호가 큰 것**으로 고른다. 수집 시각으로 고르면 과거를 한꺼번에 적재한 행은 시각이 모두 같아 기준이 없다.
+
+확정·잠정은 따로 칸을 두지 않고 `collected_at`으로 가른다. 잠정 봉은 다음 수집이 새 값으로 덮고 `collected_at`을 갱신한다(그러면 확정이 된다). 이것이 "고치지 않는다" 규칙의 유일한 예외다. 수정주가 판정은 확정 봉끼리만 한다.
 
 #### filing 공시
 
@@ -91,7 +95,8 @@ erDiagram
 | report_kind | TEXT | NOT NULL | annual, half, quarter, prelim, correction, other |
 | rcept_date | TEXT | NOT NULL | 접수 **일자**. 전자공시 API는 시각을 주지 않는다 |
 | corrects_rcept_no | TEXT | | 정정 대상 |
-| title | TEXT | NOT NULL | 키워드 규칙용 |
+| numbers_rcept_no | TEXT | | **숫자를 가져온 공시.** NULL이면 자기 숫자. 재무 API가 정정본 숫자만 주므로, 원본 뒤 90일 안의 정정이면 원본에 정정본 숫자를 붙이고 여기에 정정 번호를 적는다([[QBOT-PRD-001#R2]]). 나중에 미래 정보가 섞인 행을 가려낼 때 쓴다 |
+| title | TEXT | NOT NULL | 키워드 규칙용. 재무 기간은 여기의 (YYYY.MM)에서 정한다 |
 | collected_at | TEXT | NOT NULL | |
 
 #### financial_snapshot 재무 수치
@@ -100,14 +105,14 @@ erDiagram
 |---|---|---|---|
 | filing_id | INTEGER | FK NOT NULL | |
 | instrument_id | INTEGER | FK NOT NULL | 조회 편의를 위한 중복 |
-| period_end | TEXT | NOT NULL | 결산 기간 종료일 |
+| period_end | TEXT | NOT NULL | 결산 기간 종료일(그 달 말일). 결산월이 12월이 아닌 회사는 3·6·9·12월이 아닐 수 있다 |
 | period_kind | TEXT | NOT NULL | annual, quarter, cum3q, prelim |
 | consolidated | INTEGER | NOT NULL | 0/1 |
 | revenue, operating_income, net_income, net_income_owner | INTEGER | | |
 | equity, equity_owner | INTEGER | | |
 | eps | INTEGER | | |
 
-`cum3q`는 4분기를 유도하려고 남기는 3분기 누적값이다(4분기 = 연간 - 3분기 누적). 유도할 때 연결·별도를 섞으면 안 된다.
+`cum3q`는 4분기를 유도하려고 남기는 3분기 누적값이다(4분기 = 연간 - 3분기 누적, 결산월 기준 3개월 앞). 유도할 때 연결·별도를 섞으면 안 된다.
 
 #### trading_calendar 거래일
 
@@ -124,9 +129,9 @@ erDiagram
 
 | 컬럼 | 형 | 제약 | 뜻 |
 |---|---|---|---|
-| index_name | TEXT | NOT NULL | KOSPI, KOSPI200 |
+| index_name | TEXT | NOT NULL | KOSPI, KOSPI200, KOSDAQ |
 | date | TEXT | NOT NULL | |
-| close | REAL | NOT NULL | |
+| close | REAL | NOT NULL | 같은 날을 다시 받으면 덮는다(당일 값은 20:00까지 바뀐다) |
 
 ### 3.2 판단
 
@@ -137,13 +142,13 @@ erDiagram
 | factors_json | TEXT | NOT NULL | {name: direction} |
 | min_price, min_amount20, min_mcap | INTEGER | NOT NULL | 대상 필터 |
 | n_holdings | INTEGER | NOT NULL | |
-| trend_filter | INTEGER | NOT NULL | 0/1 |
+| trend_filter | INTEGER | NOT NULL | 0/1. 2026-09-23부터 1 |
 | index_weight | REAL | NOT NULL | 0~1 |
 | effective_from | TEXT | NOT NULL | |
 | approved_by_command_id | INTEGER | FK | 첫 설정은 NULL |
 | source_review_id | INTEGER | FK | |
 
-지수 부분에 쓸 종목 코드 칸이 없다. 지금은 코드 상수(069500 KODEX 200)다. 칸을 더할지는 6장 미결.
+지수 부분에 쓸 종목 코드 칸이 없다. 지금은 코드 상수(069500 KODEX 200)다. 칸을 더할지는 6장 미결. 손절 폭(15%)도 지금은 코드 상수다.
 
 #### decision 판단
 
@@ -196,7 +201,7 @@ erDiagram
 | 컬럼 | 형 | 제약 | 뜻 |
 |---|---|---|---|
 | idem_key | TEXT | UNIQUE NOT NULL | `decision_id:code:side` (+ 재시도면 `#n`). 같은 판단에서 남은 수량을 다시 팔려면 번호가 필요하다 |
-| decision_id | INTEGER | FK NOT NULL | |
+| decision_id | INTEGER | FK NOT NULL | 손절 매도도 그때의 판단에 매단다 |
 | instrument_id | INTEGER | FK NOT NULL | |
 | side | TEXT | NOT NULL | buy, sell |
 | qty | INTEGER | NOT NULL | |
@@ -230,8 +235,9 @@ erDiagram
 |---|---|---|---|
 | instrument_id | INTEGER | FK UNIQUE NOT NULL | |
 | qty | INTEGER | NOT NULL | |
-| avg_cost | INTEGER | NOT NULL | |
+| avg_cost | INTEGER | NOT NULL | 손절 기준(매입 평단) |
 | first_bought_on | TEXT | | |
+| stop_loss_on | TEXT | | **손절 예정으로 표시한 날.** 저녁 점검에서 종가가 평단 대비 -15% 이하일 때 적는다. 다음 거래일 매도 목록에 들어가고, 이 날짜가 판단 기준일보다 뒤면 그 판단에서 되사지 않는다. 수량이 0이 되고 새 판단이 다시 사면 NULL로 돌아간다 |
 | updated_at | TEXT | NOT NULL | |
 | updated_by | TEXT | NOT NULL | bot, reconcile |
 
@@ -394,7 +400,8 @@ erDiagram
 
 - [x] SQLite의 부분 UNIQUE(WHERE 조건)를 Alembic으로 만들 때 방언 차이 → `sqlite_where`로 만들어졌다
 - [x] `score`를 60개만 저장할지 → 상위 60 + 선정·건너뛴 행 전부
-- [ ] `strategy_config`에 지수 ETF 종목 코드 칸을 더할지. 지금은 코드 상수(069500)
+- [ ] `strategy_config`에 지수 ETF 종목 코드 칸과 손절 폭 칸을 더할지. 지금은 코드 상수(069500, 15%)
 - [ ] `trade_order`에 주문 시 예상 체결가 칸을 더할지. 없어서 하루 주문 총액을 체결 금액 합으로만 계산한다(미체결 주문 금액은 세지 못한다)
 - [ ] `bot_state`에 주문 멈춤 사유 칸을 더할지. 지금은 `status`가 최근 불일치 대조를 대신 보여 준다
 - [ ] 백업에서 `alert`와 `command`를 제외할지. 제안은 포함. 작다
+- [ ] 모의 체결 재구성용 "보내기 전 잔고"를 `trade_order`에 칸으로 남길지(지금은 프로세스 메모리)
