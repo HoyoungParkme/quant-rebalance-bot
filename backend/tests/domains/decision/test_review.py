@@ -148,3 +148,37 @@ def test_ideal_return_is_none_when_the_index_part_cannot_be_measured(session):
     session.add(d)
     session.commit()
     assert svc.ideal_return(d, upto=ends[-1]) is None
+
+
+def test_ideal_return_applies_the_same_stop_loss_as_the_account(session):
+    """관문의 모의 계산값도 손절을 똑같이 적용한다(QBOT-PRD-001 R8). 안 하면 손절할 때마다 관문이 어긋난다.
+
+    -15% 아래로 떨어진 날의 다음 거래일 종가로 청산하고, 그 뒤 반등은 받지 않는다.
+    """
+    from app.domains.decision.models import Decision, Score
+    from app.domains.marketdata.models import DailyBar, Instrument
+
+    svc, ends = make(session)
+    d = Decision(asof=ends[-2], mode="paper", strategy_config_id=1, code_version="t", status="done")
+    session.add(d)
+    session.flush()
+    inst = session.query(Instrument).filter_by(code="000001").one()
+    session.add(
+        Score(decision_id=d.id, instrument_id=inst.id, factors_json="{}", pct_json="{}", total=1, rank=1, selected=1)
+    )
+    session.commit()
+    days = svc.md.crud.calendar_between(ends[-2], ends[-1])[1:]
+    assert len(days) >= 3
+    start = svc.md.closes_on(ends[-2])["000001"]
+    moves = {days[0]: start * 0.80, days[1]: start * 0.82}  # 첫날 -20%(표시), 다음 날 -18%에 청산
+    for bar in session.query(DailyBar).filter(DailyBar.instrument_id == inst.id, DailyBar.trade_date.in_(days)):
+        if bar.trade_date in moves:
+            bar.close = int(moves[bar.trade_date])
+        else:
+            bar.close = int(start * 1.3)  # 그 뒤 크게 반등해도 이미 팔았다
+    from app.domains.decision.models import StrategyConfig
+
+    session.get(StrategyConfig, 1).index_weight = 0.0  # 지수 부분을 빼고 종목 부분만 본다
+    session.commit()
+    expected = int(start * 0.82) / start - 1  # 반등(+30%)이 아니라 청산가(-18%)
+    assert abs(svc.ideal_return(d, upto=ends[-1]) - expected) < 1e-9

@@ -27,6 +27,7 @@ def fake_app(session=None, trading_day=True, **kw):
         month_ends_until=lambda d, n: [m for m in kw.get("month_ends", []) if m <= d.isoformat()][-n:],
         bars_ready=lambda d: (kw.get("ready", True), "확정 봉 0개 / 직전 거래일 3,500개"),
         refresh_bars=lambda d: calls.append(("refresh", d)) or kw.get("refreshed", (0, [])),
+        closes_on=lambda day: kw.get("closes", {}),
     )
     app = SimpleNamespace(
         clock=FrozenClock(kw.get("now", datetime(2026, 9, 22, 18, 30, tzinfo=KST))),
@@ -43,6 +44,7 @@ def fake_app(session=None, trading_day=True, **kw):
                 pending=lambda: kw.get("pending", []),
                 picks=lambda i: ["000001"],
                 real_decision=lambda asof, mode: kw.get("existing"),
+                latest_real=lambda mode: kw.get("latest"),
             ),
             decide_month_end=lambda d, m: calls.append(("decide", d)),
         ),
@@ -52,6 +54,12 @@ def fake_app(session=None, trading_day=True, **kw):
             retry_held_sells=lambda: calls.append(("retry", None)) or [],
             cancel_open=lambda: kw.get("cancelled", 0),
             resume_after_restart=lambda: kw.get("unknowns", []),
+            mark_stop_losses=lambda d, closes: calls.append(("stops", d)) or kw.get("marks", []),
+            stop_loss_codes=lambda: kw.get("stop_codes", set()),
+            sell_stop_losses=lambda dec: (
+                calls.append(("stop_sell", dec)) or SimpleNamespace(summary=lambda: "손절 요약")
+            ),
+            confirm_open_orders=lambda *a: calls.append(("confirm", None)) or [],
         ),
         valuation=SimpleNamespace(record=lambda d: calls.append(("valuation", d))),
         reporting=SimpleNamespace(
@@ -72,7 +80,7 @@ def test_non_trading_day_skips_market_jobs(session):
 def test_evening_runs_collect_reconcile_valuation_summary_in_order(session):
     j, notes, calls = fake_app()
     j.run("저녁", j.evening, trading_only=False)
-    assert [c[0] for c in calls] == ["collect", "reconcile", "valuation"]
+    assert [c[0] for c in calls] == ["collect", "reconcile", "valuation", "stops"]  # 손절 표시는 평가액 뒤
     assert notes[-1] == ("summary", "요약 한 줄")
 
 
@@ -203,3 +211,28 @@ def test_month_end_decide_holds_when_the_refresh_mostly_fails(session):
     )
     j.run("판단", j.month_end_decide)
     assert [c[0] for c in calls] == ["refresh"] and any("재수집 실패 200종목" in t for _, t in notes)
+
+
+def test_evening_marks_stop_losses_and_announces_them(session):
+    marks = [{"code": "000001", "avg_cost": 10000, "close": 8400, "loss": -0.16}]
+    j, notes, calls = fake_app(marks=marks)
+    j.run("저녁", j.evening, trading_only=False)
+    assert ("stops", TODAY) in calls
+    assert any("내일 손절 매도 예정" in t and "000001" in t and "-16.0%" in t for _, t in notes)
+
+
+def test_sell_phase_sells_stop_losses_even_without_a_pending_decision(session):
+    """대기 판단이 없는 날도 08:40에 손절 예정 종목을 판다. 주문은 가장 최근 실제 판단에 매단다."""
+    last = SimpleNamespace(id=7, asof="2026-09-30")
+    j, notes, calls = fake_app(stop_codes={"000001"}, latest=last)
+    j.run("매도", j.sell_phase)
+    assert ("stop_sell", last) in calls and any("손절 매도 주문" in t for _, t in notes)
+    j2, _, calls2 = fake_app(stop_codes=set(), latest=last)
+    j2.run("매도", j2.sell_phase)
+    assert calls2 == []  # 손절 예정이 없으면 아무것도 하지 않는다
+
+
+def test_buy_phase_confirms_stop_loss_fills_without_a_pending_decision(session):
+    j, _, calls = fake_app()
+    j.run("매수", j.buy_phase)
+    assert ("confirm", None) in calls and ("retry", None) in calls

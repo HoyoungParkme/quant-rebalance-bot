@@ -34,6 +34,16 @@ class DecisionCrud:
         stmt = select(Decision).where(Decision.asof == asof, Decision.mode == mode, Decision.status != "replay")
         return self.s.scalar(stmt)
 
+    def latest_real(self, mode: str) -> Decision | None:
+        """가장 최근의 실제 판단(재현 제외). 대기 판단이 없는 날 손절 매도를 매달 판단이다."""
+        stmt = (
+            select(Decision)
+            .where(Decision.mode == mode, Decision.status != "replay")
+            .order_by(Decision.asof.desc(), Decision.id.desc())
+            .limit(1)
+        )
+        return self.s.scalar(stmt)
+
     def add_decision(self, d: Decision, scores: list[Score]) -> Decision:
         self.s.add(d)
         self.s.flush()

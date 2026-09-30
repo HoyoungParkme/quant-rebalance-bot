@@ -11,8 +11,9 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import date
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -26,6 +27,7 @@ from app.core.errors import (
     OrdersBlocked,
     Precondition,
 )
+from app.core.rules import STOP_LOSS
 from app.domains.risk.service import GATE_REASONS
 from app.domains.trading.crud import TradingCrud
 from app.domains.trading.models import Fill, Reconciliation, ReconciliationDiff, TradeOrder
@@ -294,9 +296,11 @@ class OrderExecutor:
         if o.side == "buy":
             new_qty = held + qty
             avg = round(((p.avg_cost * held if p else 0) + price * qty) / new_qty)
-            self.crud.upsert_position(
+            row = self.crud.upsert_position(
                 o.instrument_id, new_qty, avg, self._now(), "bot", first_on=self.clock.today().isoformat()
             )
+            if held == 0:
+                row.stop_loss_on = None  # 새 매입이다. 지난번 손절 표시는 이번 보유와 관계없다
         else:
             self.crud.upsert_position(
                 o.instrument_id, max(held - qty, 0), p.avg_cost if p else price, self._now(), "bot"
@@ -484,21 +488,27 @@ class TradingService:
         targets = set(plan.picks) | ({self.index_etf} if plan.index_weight > 0 else set())
         halted = self.halted_codes_fn()
 
+        stops = self.stop_loss_codes()  # 손절 예정(저녁 점검이 표시). 목표에 있어도 판다 (QBOT-PRD-001 R6)
+        pending_sells = self.crud.pending_sell_instruments()
         if phase in ("all", "sell"):
             wait = phase == "all"  # 동시호가 주문은 기다리지 않는다. 09시까지 체결되지 않는다
             for code, qty in sorted(held.items()):
-                if code in targets or qty <= 0:
+                if (code in targets and code not in stops) or qty <= 0:
                     continue
+                if code in stops and ids.get(code) in pending_sells:
+                    continue  # 이미 걸린 손절·보류 매도가 있다. 또 내면 같은 주식을 두 번 판다
                 if code in halted:  # 오늘은 못 판다. 행만 남기고 retry_held_sells가 매일 다시 본다
                     self._hold_sell(decision.id, ids.get(code), code, qty)
                     res.held.append(code)
                     continue
+                # 손절 매도는 빈 시도 번호로 낸다. 어제 취소된 주문 키를 다시 쓰면 실행기가 옛 결과를 돌려주고 안 판다
+                attempt = self._free_attempt(decision.id, code, "sell") if code in stops else 0
                 self._try(
                     res,
                     code,
                     "sell",
-                    lambda c=code, q=qty: self.executor.send(
-                        decision.id, ids[c], c, "sell", q, self.price_fn(c), wait=wait
+                    lambda c=code, q=qty, a=attempt: self.executor.send(
+                        decision.id, ids[c], c, "sell", q, self.price_fn(c), attempt=a, wait=wait
                     ),
                     counted=wait,
                 )
@@ -506,16 +516,19 @@ class TradingService:
             self.s.commit()
             return res  # 체결은 09시에 확인한다. 판단은 running으로 둔다
 
-        if phase == "buy":
-            held = self._held_by_code()  # 팔린 만큼 보유가 줄었다
+        held = self._held_by_code()  # 팔린 만큼 보유가 줄었다(all은 방금 판 것, buy는 동시호가에 판 것)
 
         bal = self.broker.balance()
         cash = bal.cash
         n = max(plan.n_holdings, 1)
         budget = int(bal.total_equity * (1 - plan.index_weight) / n)
 
+        blocked = self._stopped_for(decision)  # 이 판단에서 손절한 종목. 그 자리는 월말까지 현금
         for code in plan.picks:  # 점수 순
             if code in held and held[code] > 0:
+                continue
+            if code in blocked:
+                res.skipped[code] = "stop_loss"
                 continue
             if code not in ids:
                 res.skipped[code] = "unknown"
@@ -548,6 +561,95 @@ class TradingService:
         if self.notify:
             self.notify("fill", f"{decision.asof} 실행: {res.summary()}")
         return res
+
+    # ----- 손절 (QBOT-PRD-001 R6, QBOT-MS-001 TradingService.mark_stop_losses) -----
+    def mark_stop_losses(self, d: date, closes: Mapping[str, float]) -> list[dict]:
+        """저녁 점검. 확정 종가가 매입 평단 대비 -15% 이하인 보유 종목을 손절 예정으로 표시한다.
+
+        주문은 여기서 내지 않는다. 다음 거래일 08:40 매도 단계가 판다. 지수 상장지수펀드는 대상이 아니다.
+        이미 표시된 종목은 다시 표시하지 않고 돌려주지도 않는다(알림 중복 방지).
+        """
+        state = self.state_fn()
+        if state.get("orders_blocked"):
+            # 계좌와 기록이 어긋나 있다(분할·병합 뒤 평단이 옛값인 경우 등). 그 평단으로 손실을 재면 가짜 손절이 된다.
+            # 사람이 계좌 기준으로 맞춘 뒤(평단도 계좌 값으로 바뀐다) 다음 저녁에 다시 잰다
+            return []
+        out = []
+        for p in self.crud.positions():
+            code = self.code_of(p.instrument_id)
+            if code is None or code == self.index_etf or p.stop_loss_on or p.avg_cost <= 0:
+                continue
+            close = closes.get(code)
+            if not close or close != close:  # 종가가 없거나 NaN(거래정지 등)이면 건너뛴다
+                continue
+            loss = close / p.avg_cost - 1
+            if loss <= STOP_LOSS:
+                p.stop_loss_on = d.isoformat()
+                out.append({"code": code, "avg_cost": p.avg_cost, "close": int(close), "loss": loss})
+        self.s.commit()
+        return out
+
+    def stop_loss_codes(self) -> set[str]:
+        """손절 예정이면서 아직 들고 있는 종목."""
+        held = {p.instrument_id for p in self.crud.positions()}
+        return {c for i in self.crud.stop_marked() if i in held and (c := self.code_of(i)) is not None}
+
+    def _stopped_for(self, decision) -> set[str]:
+        """이 판단에서 되사지 않을 손절 종목.
+
+        기준일 **당일 이후**의 표시(월말 20:10 점검이 21:00 판단보다 먼저 돈다), 그리고 이 판단 아래 팔린 표시 종목
+        (기준일 전 표시지만 거래정지로 못 팔다 이 판단에서 판 것). 안 막으면 08:40에 팔고 09:05에 되산다(리뷰 지적).
+        """
+        sold = self.crud.sold_in(decision.id)
+        return {
+            c
+            for i, on in self.crud.stop_marked().items()
+            if (on >= decision.asof or i in sold) and (c := self.code_of(i)) is not None
+        }
+
+    def sell_stop_losses(self, decision) -> ExecutionResult:
+        """대기 판단이 없는 날 08:40에 손절 예정 종목만 판다. 주문은 가장 최근 실제 판단에 매단다.
+
+        대기 판단이 있는 날은 execute(phase=sell)가 손절 종목을 같이 판다.
+        """
+        state = self.state_fn()
+        if state.get("halted") or state.get("orders_blocked"):
+            raise OrdersBlocked("정지 또는 주문 멈춤 상태다. 손절 매도도 내지 않는다")
+        rec = self.reconcile()
+        if rec.result == "mismatch":
+            raise OrdersBlocked("계좌가 기록과 다르다. 확인 뒤 reconcile_accept 로 정리해야 주문이 나간다")
+        res = ExecutionResult()
+        ids, held, halted = self.instrument_ids(), self._held_by_code(), self.halted_codes_fn()
+        pending_sells = self.crud.pending_sell_instruments()
+        for code in sorted(self.stop_loss_codes()):
+            qty = held.get(code, 0)
+            if qty <= 0 or ids.get(code) in pending_sells:
+                continue  # 이미 걸린 보류·매도가 있으면 그쪽이 판다. 또 내면 같은 주식을 두 번 판다
+            if code in halted:
+                self._hold_sell(decision.id, ids.get(code), code, qty)
+                res.held.append(code)
+                continue
+            attempt = self._free_attempt(decision.id, code, "sell")
+            self._try(
+                res,
+                code,
+                "sell",
+                lambda c=code, q=qty, a=attempt: self.executor.send(
+                    decision.id, ids[c], c, "sell", q, self.price_fn(c), attempt=a, wait=False
+                ),
+                counted=False,
+            )
+        self.s.commit()
+        return res
+
+    def _free_attempt(self, decision_id: int, code: str, side: str) -> int:
+        """그 판단에서 아직 쓰지 않은 시도 번호. 끝난 주문 키를 다시 쓰면 실행기가 옛 결과를 돌려주고 안 판다."""
+        for attempt in range(MAX_SELL_ATTEMPTS):
+            key = f"{decision_id}:{code}:{side}" + (f"#{attempt}" if attempt else "")
+            o = self.crud.order_by_key(key)
+            if o is None or o.status in ("planned", "rejected"):
+                return attempt
+        return MAX_SELL_ATTEMPTS
 
     def _held_by_code(self) -> dict[str, int]:
         """보유를 종목 코드로 읽는다. 코드를 못 찾는 행은 대조가 '기록에 없는 종목'으로 잡게 남겨 둔다."""

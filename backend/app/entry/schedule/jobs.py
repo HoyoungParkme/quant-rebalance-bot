@@ -83,19 +83,28 @@ class Jobs:
         self.app.ops.notify("summary", f"오늘 {d.asof} 판단을 실행한다. 매수 후보 {len(picks)}종목")
 
     def sell_phase(self) -> None:
-        """08:40. 장 시작 전 동시호가에 매도를 걸어 둔다."""
+        """08:40. 장 시작 전 동시호가에 매도를 걸어 둔다. 대기 판단이 없어도 손절 예정 종목은 판다."""
         d = self._pending()
-        if d is None:
+        if d is not None:
+            res = self.app.trading.execute(d, phase="sell")  # 목표에서 빠진 종목과 손절 예정 종목
+            if res.errors or res.skipped or res.held:
+                self.app.ops.notify("error", f"{d.asof} 장 시작 전 매도: {res.summary()}")
             return
-        res = self.app.trading.execute(d, phase="sell")
-        if res.errors or res.skipped or res.held:
-            self.app.ops.notify("error", f"{d.asof} 장 시작 전 매도: {res.summary()}")
+        if not self.app.trading.stop_loss_codes():
+            return
+        last = self.app.decision.crud.latest_real(self.app.settings.mode)
+        if last is None:
+            return
+        res = self.app.trading.sell_stop_losses(last)
+        self.app.ops.notify("order", f"손절 매도 주문: {res.summary()}")
 
     def buy_phase(self) -> None:
         """09:05. 매도 체결을 확인하고 그 돈으로 산다. 보류 매도도 다시 시도한다."""
         d = self._pending()
         if d is not None:
             self.app.trading.execute(d, phase="buy")  # 체결 요약 알림은 execute가 보낸다
+        else:
+            self.app.trading.confirm_open_orders()  # 대기 판단 없이 낸 손절 매도의 체결을 기록한다
         self.app.trading.retry_held_sells()
 
     def cancel_open(self) -> None:
@@ -124,6 +133,10 @@ class Jobs:
         self.app.trading.reconcile()
         self.app.valuation.record(d)
         self.app.session.commit()
+        marks = self.app.trading.mark_stop_losses(d, self.app.md.closes_on(d.isoformat()))
+        if marks:
+            lines = [f"{m['code']} 평단 {m['avg_cost']:,} → 종가 {m['close']:,} ({m['loss']:+.1%})" for m in marks]
+            self.app.ops.notify("order", "내일 손절 매도 예정:\n" + "\n".join(lines))
         self.app.ops.notify("summary", self.app.reporting.daily_summary(d))
 
     def month_end_decide(self) -> None:

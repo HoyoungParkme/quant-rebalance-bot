@@ -17,6 +17,7 @@ import pandas as pd
 
 from app.core.errors import DataNotReady, Precondition
 from app.core.pit import PointInTime
+from app.core.rules import STOP_LOSS
 from app.domains.decision import scoring
 from app.domains.decision.crud import DecisionCrud
 from app.domains.decision.models import Decision, RuleReview, Score, StrategyConfig
@@ -308,12 +309,31 @@ class DecisionService:
         if not later:
             return None
         start, end = self.md.closes_on(decision.asof), self.md.closes_on(later[0])
+        days = self.md.crud.calendar_between(
+            (date.fromisoformat(decision.asof) + timedelta(days=1)).isoformat(), later[0]
+        )
+        path = {d: self.md.closes_on(d) for d in days} if picks else {}
 
         def ret(code: str) -> float | None:
             a, b = start.get(code), end.get(code)
             return (b / a - 1) if a and b else None
 
-        stock = [r for r in (ret(c) for c in picks) if r is not None]
+        def ret_with_stop(code: str) -> float | None:
+            """실제 계좌와 같은 손절 규칙으로 잰다(QBOT-PRD-001 R6·R8). 안 그러면 손절할 때마다 관문이 어긋난다.
+
+            종가가 매입가 대비 -15% 이하인 날 표시, 다음 거래일 종가로 청산하고 그 뒤는 현금(0)이다.
+            """
+            a = start.get(code)
+            if not a:
+                return None
+            for k, d in enumerate(days):
+                c = path[d].get(code)
+                if c and c / a - 1 <= STOP_LOSS:
+                    nxt = path[days[k + 1]].get(code) if k + 1 < len(days) else c
+                    return (nxt or c) / a - 1
+            return ret(code)
+
+        stock = [r for r in (ret_with_stop(c) for c in picks) if r is not None]
         index = ret(index_etf)
         if not stock and index is None:
             return None

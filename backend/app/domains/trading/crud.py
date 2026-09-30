@@ -71,9 +71,32 @@ class TradingCrud:
             )
         )
 
+    def pending_sell_instruments(self) -> set[int]:
+        """아직 끝나지 않은 매도가 걸린 종목(보류 포함). 같은 주식을 두 번 팔지 않으려고 본다."""
+        rows = self.s.scalars(
+            select(TradeOrder.instrument_id).where(
+                TradeOrder.side == "sell",
+                or_(TradeOrder.status.in_(OPEN_STATUSES), TradeOrder.status.in_(("partial", "held"))),
+                TradeOrder.closed_at.is_(None),
+            )
+        )
+        return set(rows)
+
+    def sold_in(self, decision_id: int) -> set[int]:
+        """그 판단 아래 매도 주문이 있는 종목."""
+        rows = self.s.scalars(
+            select(TradeOrder.instrument_id).where(TradeOrder.decision_id == decision_id, TradeOrder.side == "sell")
+        )
+        return set(rows)
+
     # ----- 보유 -----
     def positions(self) -> list[Position]:
         return list(self.s.scalars(select(Position).where(Position.qty > 0).order_by(Position.instrument_id)))
+
+    def stop_marked(self) -> dict[int, str]:
+        """손절 표시가 있는 보유 행 {instrument_id: 표시한 날}. 수량 0인 행도 포함한다(되사기 막기용)."""
+        rows = self.s.scalars(select(Position).where(Position.stop_loss_on.is_not(None)))
+        return {p.instrument_id: p.stop_loss_on for p in rows}
 
     def position(self, instrument_id: int) -> Position | None:
         return self.s.scalars(select(Position).where(Position.instrument_id == instrument_id)).first()

@@ -45,6 +45,8 @@ class Position(IdCreated, Base):
     qty: Mapped[int] = mapped_column(Integer, nullable=False)
     avg_cost: Mapped[int] = mapped_column(Integer, nullable=False)
     first_bought_on: Mapped[str | None] = mapped_column(String(10))
+    # 손절 예정으로 표시한 날(QBOT-PRD-001 R6). 새로 사면(수량 0에서) 지운다
+    stop_loss_on: Mapped[str | None] = mapped_column(String(10))
     updated_at: Mapped[str] = mapped_column(String(25), nullable=False)
     updated_by: Mapped[str] = mapped_column(String(14), nullable=False)
 
