@@ -14,7 +14,7 @@ SQLite 파일 하나에 들어가는 테이블과 컬럼, 키, 인덱스를 정�
 
 공통 규칙: 기본 키는 `id INTEGER`. 시각은 ISO 8601 문자열(한국 시간). 금액은 원 단위 정수. 날짜는 `YYYY-MM-DD` 문자열. `created_at`은 모든 테이블에 있고 표에서는 생략한다.
 
-2026-09-23~29 운용에서 더해진 칸: `filing.numbers_rcept_no`, `position.stop_loss_on`. 마이그레이션은 Alembic으로 남긴다.
+2026-09-23~29 운용에서 더해진 칸: `filing.numbers_rcept_no`, `position.stop_loss_on`. 2026-10-01 명세 미달분 정리에서 더해진 칸: `trade_order.pre_qty`·`pre_cost`, `fill.realized_pnl`, `position.exit_reason`, `gate_record.released_at`·`released_by_command_id`. 마이그레이션은 Alembic으로 남긴다.
 
 ## 1. 개념 식별
 
@@ -210,6 +210,8 @@ erDiagram
 | status | TEXT | NOT NULL | planned, unknown, sent, filled, partial, cancelled, rejected, held |
 | broker_order_no | TEXT | | 증권사 주문번호. **날마다 새로 매겨진다** |
 | retry_count | INTEGER | NOT NULL DEFAULT 0 | |
+| pre_qty | INTEGER | | **보내기 전 그 종목의 계좌 수량.** 모의투자 체결 재구성의 기준(INFRA 5.1). 프로세스 메모리에 두면 재시작·조회 실패 뒤에 재구성하지 못한다(2026-09-29에 겪음) |
+| pre_cost | INTEGER | | 보내기 전 그 종목의 매입원가 합(수량 × 평단). 매수 체결가 재구성에 쓴다 |
 | reject_reason | TEXT | | 관문 사유(halted·concentration 등)거나 증권사 메시지. 관문 사유는 실전 관문의 "주문 오류" 집계에서 뺀다 |
 | sent_at, closed_at | TEXT | | |
 
@@ -226,6 +228,7 @@ erDiagram
 | tax | INTEGER | NOT NULL | 매도만. 추정값 |
 | filled_at | TEXT | NOT NULL | |
 | broker_fill_no | TEXT | NOT NULL | `{증권사주문번호}:{누적수량}`. 증권사가 체결 번호를 안 주므로 실행기가 합성한다 |
+| realized_pnl | INTEGER | | **매도의 실현 손익** = 수량 × (체결가 - 그때 평단) - 수수료 - 세금. 매수는 NULL. 모의는 매도가가 그날 매도 평균가라 종목별로는 근사값이다(INFRA 5.1). 2026-10-01 전 체결은 NULL |
 
 증권사는 누적 체결과 누적 평균가만 준다. 그래서 늘어난 수량과 그 구간 금액만 행으로 넣고, 키는 누적 수량으로 잡는다. 같은 응답을 두 번 봐도 같은 키라 중복되지 않는다. **NULL을 허용하면 안 된다** — SQLite는 NULL이 여럿 있어도 UNIQUE 위반으로 보지 않아 중복 체결이 들어온다.
 
@@ -237,7 +240,8 @@ erDiagram
 | qty | INTEGER | NOT NULL | |
 | avg_cost | INTEGER | NOT NULL | 손절 기준(매입 평단) |
 | first_bought_on | TEXT | | |
-| stop_loss_on | TEXT | | **손절 예정으로 표시한 날.** 저녁 점검에서 종가가 평단 대비 -15% 이하일 때 적는다. 다음 거래일 매도 목록에 들어가고, 이 날짜가 판단 기준일보다 뒤면 그 판단에서 되사지 않는다. 수량이 0이 되고 새 판단이 다시 사면 NULL로 돌아간다 |
+| stop_loss_on | TEXT | | **매도 예정으로 표시한 날**(이름은 손절에서 왔다). 저녁 점검에서 종가가 평단 대비 -15% 이하일 때 적는다. 다음 거래일 매도 목록에 들어가고, 이 날짜가 판단 기준일보다 뒤면 그 판단에서 되사지 않는다. 수량이 0이 되고 새 판단이 다시 사면 NULL로 돌아간다 |
+| exit_reason | TEXT | | 매도 예정 사유: `stop_loss`(-15%), `managed`(관리종목·정리매매 지정). `stop_loss_on`과 같이 쓰고 같이 지운다. 동작은 같고 알림과 보고만 다르다 |
 | updated_at | TEXT | NOT NULL | |
 | updated_by | TEXT | NOT NULL | bot, reconcile |
 
@@ -324,6 +328,8 @@ erDiagram
 | approved_at | TEXT | | |
 | capital | INTEGER | | |
 | first_month_ratio | REAL | | |
+| released_at | TEXT | | 첫 달 매수 상한을 푼 일시(`gate_release`). 첫 달 체결 오차가 1%p 이내일 때만 |
+| released_by_command_id | INTEGER | FK | |
 
 승인하면 이 행을 **실전 데이터베이스에도 복사**한다. 모의와 실전은 파일이 다르므로(INFRA 6장) 모의 쪽에만 남기면 실전으로 시작할 때 통과 기록을 못 찾아 거부된다.
 
@@ -335,8 +341,8 @@ erDiagram
 |---|---|---|---|
 | year_month | TEXT | NOT NULL | YYYY-MM |
 | mode | TEXT | NOT NULL | |
-| metrics_json | TEXT | NOT NULL | 수익률·낙폭·비용·코스피 대비 |
-| factor_effects_json | TEXT | NOT NULL | 지표별 효과. 월간 보고에서는 비워 둔다(연 1회 재점검이 계산한다) |
+| metrics_json | TEXT | NOT NULL | 수익률·낙폭·원금 대비·비용(그달·누적)·실현 손익·코스피·전 종목 동일 비중·모의 계산값·체결 오차·전략 부분·지수 부분 |
+| factor_effects_json | TEXT | NOT NULL | 지표 7개의 최근 12개월 효과(평균·t값·개월 수). **2026-10-01 전에는 "비워 둔다(연 1회 재점검이 계산한다)"였다 — PRD R12·UC-A6과 어긋난 명세였다** |
 | notes | TEXT | | 계산 못 한 항목과 이유 |
 
 ### 3.6 운영
@@ -404,4 +410,4 @@ erDiagram
 - [ ] `trade_order`에 주문 시 예상 체결가 칸을 더할지. 없어서 하루 주문 총액을 체결 금액 합으로만 계산한다(미체결 주문 금액은 세지 못한다)
 - [ ] `bot_state`에 주문 멈춤 사유 칸을 더할지. 지금은 `status`가 최근 불일치 대조를 대신 보여 준다
 - [ ] 백업에서 `alert`와 `command`를 제외할지. 제안은 포함. 작다
-- [ ] 모의 체결 재구성용 "보내기 전 잔고"를 `trade_order`에 칸으로 남길지(지금은 프로세스 메모리)
+- [x] 모의 체결 재구성용 "보내기 전 잔고"를 `trade_order`에 칸으로 남길지 → 남긴다(`pre_qty`·`pre_cost`)
