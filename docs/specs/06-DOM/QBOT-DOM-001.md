@@ -204,6 +204,8 @@ erDiagram
 
 ## 5. 미결사항
 
-- [ ] DailyBar의 판 번호를 종목 단위로 둘지 전체 단위로 둘지. 제안은 종목 단위
-- [ ] 지수 상장지수펀드를 Instrument 종류로 구분할지 별도 개념으로 둘지. 제안은 Instrument 종류
-- [ ] 잠정실적 공시의 수치를 FinancialSnapshot에 같은 구조로 넣을지. 제안은 같은 구조에 기간 종류 "잠정"을 추가
+세 건 모두 제안대로 구현됐다(`backend/app/domains/marketdata/models.py`).
+
+- [x] DailyBar의 판 번호를 종목 단위로 둘지 전체 단위로 둘지. 제안은 종목 단위 → 종목 단위 (유일 키: 종목·판 번호·거래일)
+- [x] 지수 상장지수펀드를 Instrument 종류로 구분할지 별도 개념으로 둘지. 제안은 Instrument 종류 → Instrument 종류 `etf`
+- [x] 잠정실적 공시의 수치를 FinancialSnapshot에 같은 구조로 넣을지. 제안은 같은 구조에 기간 종류 "잠정"을 추가 → 같은 구조, 기간 종류 `prelim`. v1은 잠정실적 수치를 지표에 쓰지 않는다
