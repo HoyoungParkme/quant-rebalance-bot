@@ -221,12 +221,16 @@ classDiagram
     +review_rules(asof, months) RuleReview
     +approve_review(review_id, command_id) StrategyConfig
     +ideal_return(decision, upto, index_etf) float
+    +factor_effects(asof, months, factors) dict
+    +month_benchmarks(month_start, month_end, mode) Benchmarks
   }
 ```
 
 - `decide_month_end`: PointInTime을 만들고 universe·bars·financials·statuses를 읽어 점수를 내고, 현금 전환과 지수 비중을 적용해 Decision과 Score를 "대기"로 저장한다
 - `replay`: 같은 절차를 과거 기준일로 돌리되 상태를 "재현"으로 저장하고 알림·주문을 내지 않는다. 자금은 **그날 판단의 예산**을 되살린다
-- `ideal_return`: 체결 오차가 없다고 볼 때의 수익률. 종목 부분과 지수 부분을 비중대로 섞는다. 실전 관문이 실제 계좌와의 차이를 본다
+- `ideal_return`: 체결 오차가 없다고 볼 때의 수익률. 종목 부분과 지수 부분을 비중대로 섞는다. 손절 규칙도 같게 적용한다. 실전 관문과 월간 보고가 실제 계좌와의 차이를 본다
+- `factor_effects`: 지표별 "상위 10% - 하위 10%" 다음 달 수익률 차이의 평균·t값. 저장하지 않는다. `review_rules`(후보 전체, 36개월)와 월간 보고(지금 설정의 7개, 12개월)가 같이 쓴다
+- `month_benchmarks`: 그달 보유를 정한 판단으로 모의 계산값·전 종목 동일 비중·지표 12개월 효과를 한 번에 낸다
 
 ### 4.4 trading
 
@@ -238,7 +242,7 @@ classDiagram
     <<interface>>
     +place_order(req: OrderRequest) str
     +cancel_order(order_no) bool
-    +order_status(order_no) BrokerOrder
+    +order_status(order_no, hint: OrderHint) BrokerOrder
     +orders_today() list~BrokerOrder~
     +balance() Balance
   }
@@ -247,6 +251,7 @@ classDiagram
 ```
 
 - 모드에 따른 키와 거래 ID를 쓴다. 모의 접속에 실전 거래 ID를 보내면 거부되고 그 반대도 거부되므로, 모드가 틀리면 주문이 나가는 게 아니라 실패한다
+- `OrderHint(code, side, qty, pre_qty, pre_cost)`는 주문 행에 저장된 보내기 전 잔고다. 모의투자 어댑터는 주문별 체결 내역이 없어 이것과 지금 잔고의 차이로 체결을 재구성한다. 실전 어댑터는 쓰지 않는다. **어댑터는 주문을 기억하지 않는다** — 2026-10-01 전에는 어댑터 메모리에 두어 재시작·조회 실패 뒤 재구성하지 못했다
 
 #### OrderExecutor 주문 실행기
 
@@ -262,7 +267,7 @@ classDiagram
   }
 ```
 
-- `send`: 멱등 키 확인 → 관문 판정 → "보낼 예정" → **"보냈는지 모름"으로 커밋** → 전송 → "보냄" → 체결 확인. 전송 호출은 재시도하지 않는다([[QBOT-INFRA-001#C8]])
+- `send`: 멱등 키 확인 → 관문 판정 → "보낼 예정" → **보내기 전 잔고 조회(실패면 "보낼 예정"으로 두고 끝)** → 잔고와 함께 **"보냈는지 모름"으로 커밋** → 전송 → "보냄" → 체결 확인. 전송 호출은 재시도하지 않는다([[QBOT-INFRA-001#C8]]). 매도 체결은 실현 손익을 같이 남긴다
 - `wait=False`면 체결을 기다리지 않는다. 장 시작 전 동시호가 주문용
 - `reconcile_unknown`: 재시작 때 "보냈는지 모름" 주문을 그날 증권사 내역과 맞춰 확정한다
 
@@ -283,11 +288,16 @@ classDiagram
     +resume_after_restart() list~TradeOrder~
     +confirm_open_orders(decision_id) list~str~
     +cancel_open() int
+    +mark_stop_losses(d, closes) list~dict~
+    +mark_status_exits(d, statuses) list~dict~
+    +sell_stop_losses(decision) ExecutionResult
   }
 ```
 
 - `execute`: 상태 확인 → 대조 → 매도 → **잔고 재조회** → 매수 → 지수 조정. `phase`로 매도(08:40)와 매수(09:05)를 나눠 부른다
 - `equity_snapshot`은 OrderGate가 읽는 값이다. 계좌 조회 한 번으로 현금·보유·평가액을 채운다
+- `mark_stop_losses`·`mark_status_exits`: 저녁 점검에서 "매도 예정"을 붙인다(사유: 손절·관리종목). 주문은 내지 않는다. 다음 날 08:40 `execute(sell)` 또는 대기 판단이 없으면 `sell_stop_losses`가 판다
+- `confirm_open_orders`: 09:05 매수 단계 첫 일과 20:10 대조 직전에 열린 주문의 체결을 다시 확인한다
 
 ### 4.5 risk
 
@@ -329,11 +339,13 @@ classDiagram
     -seed_live
     +check() GateResult
     +approve(capital, ratio, command_id) GateRecord
+    +release(command_id) GateRecord
   }
 ```
 
 - 다섯 조건을 집계해 GateRecord로 남긴다. 못 잰 조건은 통과가 아니라 미달이다
 - `approve`는 실전 데이터베이스를 만들고 기록을 옮겨 심는다. 돌고 있는 모의 상태는 건드리지 않는다
+- `release`는 실전 첫 달 매수 상한을 푼다. 첫 달 월간 보고의 체결 오차가 1%p 이내일 때만
 
 #### RiskService 위험 관리 서비스
 
@@ -359,6 +371,8 @@ classDiagram
   class ReportingService {
     -crud: ReportingCrud
     -risk: RiskCrud
+    -benchmarks_fn
+    -etf_return_fn
     +daily_summary(d: date) str
     +monthly(year, month, mode) MonthlyReport
     +describe_monthly(row) str
@@ -366,7 +380,8 @@ classDiagram
 ```
 
 - `monthly`: 평가액 기록으로 수익률을 내고 코스피와 견준다. 시작값은 **지난달 마지막 평가액**이고 입출금은 분모에서 뺀다
-- 지표별 효과는 월간 보고에서 계산하지 않는다. 월말마다 36개월치를 다시 계산하면 너무 느리다. 연 1회 재점검(`review_rules`)이 맡는다
+- `daily_summary`: 평가액, **전일 대비(입출금 제외)**, 고점·원금 대비, 보유 종목, 매도 예정
+- `monthly`는 원금 대비 누적 손익, 그달·누적 비용, 그달 실현 손익, 전 종목 동일 비중, 모의 계산값과 체결 오차, 전략·지수 부분, **지표 7개의 12개월 효과**를 담는다. 2026-10-01 전에는 "지표별 효과는 월간 보고에서 계산하지 않는다(36개월치를 매달 다시 계산하면 느리다)"였는데, PRD R12·UC-A6과 어긋났다. 12개월·7개 지표로 줄이면 한 달에 한 번 몇 분이다
 
 ### 4.7 ops
 
