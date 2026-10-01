@@ -28,6 +28,7 @@ upstream: [QBOT-UC-001, QBOT-DOM-002, QBOT-API-001]
 | 관문 | GATE | OrderGate | 서비스 | [[QBOT-DOM-002#OrderGate]] |
 | 위험 관리 | RS | RiskService | 서비스 | [[QBOT-DOM-002#RiskService]] |
 | 운영 | OPS | OpsService | 서비스 | [[QBOT-DOM-002#OpsService]] |
+| 보고 | RPT | ReportingService | 서비스 | [[QBOT-DOM-002#ReportingService]] |
 | 데이터베이스 | DB | SQLite | 저장소 | [[QBOT-DOM-003]] |
 | 증권사 | KIS | BrokerPort → KisAdapter | 외부 | [[QBOT-DOM-002#BrokerPort]] |
 | 전자공시 | DART | FilingPort → DartAdapter | 외부 | [[QBOT-DOM-002#FilingPort]] |
@@ -49,6 +50,7 @@ sequenceDiagram
   participant TS
   participant RS
   participant OPS
+  participant RPT
   participant DB
   Note over SCH: 20:10 — 당일 봉이 확정되는 20:00 뒤
   SCH->>MD: collect_daily(today)
