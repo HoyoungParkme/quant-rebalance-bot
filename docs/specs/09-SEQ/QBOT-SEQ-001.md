@@ -58,6 +58,10 @@ sequenceDiagram
   MD->>DB: filing·financial_snapshot 추가 (정정 90일 규칙)
   MD-->>SCH: CollectResult(실패·새 판·뒤늦게 바뀐 봉)
   SCH->>OPS: notify(error, 실패·새 판·바뀐 봉이 있으면)
+  SCH->>TS: confirm_open_orders()
+  TS->>DB: 오늘 sent·unknown 주문 (보내기 전 잔고 pre_qty·pre_cost 포함)
+  TS->>KIS: order_status(no) — 모의는 저장된 보내기 전 잔고로 재구성
+  TS->>DB: fill 추가, 끝난 주문 닫기
   SCH->>TS: reconcile()
   TS->>KIS: balance()
   TS->>DB: reconciliation 저장
@@ -73,17 +77,21 @@ sequenceDiagram
     RS->>DB: bot_state.buy_suspended = 1
     RS->>OPS: notify(limit, …)
   end
-  SCH->>TS: mark_stop_losses(today)
-  TS->>DB: 보유 × 오늘 종가: close/avg_cost - 1 <= -0.15 → position.stop_loss_on = today
-  TS-->>SCH: 손절 예정 목록
+  SCH->>TS: mark_stop_losses(today, closes)
+  TS->>DB: 보유 × 오늘 종가: close/avg_cost - 1 <= -0.15 → stop_loss_on = today, exit_reason = stop_loss
+  SCH->>TS: mark_status_exits(today, statuses)
+  TS->>DB: 보유 중 managed·liquidation 상태 → stop_loss_on = today, exit_reason = managed
+  TS-->>SCH: 매도 예정 목록(사유별)
   opt 있음
-    SCH->>OPS: notify(order, 내일 손절 매도 예정: 종목·평단·종가·손실률)
+    SCH->>OPS: notify(order, 내일 매도 예정: 종목·사유·평단·종가·손실률)
   end
+  SCH->>RPT: daily_summary(today)
+  RPT->>DB: 오늘·직전 valuation → 전일 대비 = 오늘 - 직전 - 오늘 입출금
   SCH->>OPS: notify(summary, 일일 요약)
   OPS->>TG: send
 ```
 
-**읽을 때 볼 것**: 수집 실패는 흐름을 멈추지 않고 결과 목록에 담겨 알림으로 간다. 계좌 불일치·손실 한도·손절 예정은 여기서 **상태만** 바꾼다. 그 상태를 읽어 주문을 내거나 막는 것은 SEQ-3·SEQ-4다. 손절 표시는 지수 ETF를 건너뛰고, 이미 표시된 종목은 다시 알리지 않는다.
+**읽을 때 볼 것**: 수집 실패는 흐름을 멈추지 않고 결과 목록에 담겨 알림으로 간다. 대조 **전에** 오늘 확인하지 못한 주문을 다시 확인한다 — 조회 시간 초과로 체결을 놓친 주문을 대조가 불일치로 잡기 전에 고친다(2026-09-29에 겪음). 계좌 불일치·손실 한도·매도 예정(손절·관리종목)은 여기서 **상태만** 바꾼다. 그 상태를 읽어 주문을 내거나 막는 것은 SEQ-3·SEQ-4다. 손절 표시는 지수 ETF를 건너뛰고, 이미 표시된 종목은 다시 알리지 않는다.
 
 #### SEQ-2 월말 판단
 
@@ -146,7 +154,12 @@ sequenceDiagram
       EX-->>TS: Order(rejected)
     else 허용
       EX->>DB: INSERT status = planned (UNIQUE idem_key)
-      EX->>DB: UPDATE status = unknown (커밋)
+      EX->>KIS: balance() — 보내기 전 잔고(그 종목 수량·매입원가)
+      alt 조회 실패 (네 번 모두)
+        EX->>DB: status = planned 유지
+        EX-->>TS: BrokerUnavailable (확실히 안 보냄)
+      end
+      EX->>DB: UPDATE pre_qty, pre_cost, status = unknown (커밋)
       EX->>KIS: place_order(req)  ※ 재시도 없음
       KIS-->>EX: broker_order_no
       EX->>DB: UPDATE broker_order_no, status = sent
@@ -155,16 +168,19 @@ sequenceDiagram
       else
         loop 체결 확인 (제한 시간)
           EX->>KIS: order_status(no)
-          Note over KIS: 모의는 주문별 내역이 없어 잔고 차이로 재구성
+          Note over KIS: 모의는 주문별 내역이 없어 pre_qty·pre_cost와 지금 잔고의 차이로 재구성
         end
-        EX->>DB: fill 추가, status = filled/partial
+        alt 조회가 끝내 실패
+          EX-->>TS: Order(sent) — 열어 둔다. 15:40·20:10에 다시 확인
+        end
+        EX->>DB: fill 추가(매도면 realized_pnl), status = filled/partial
         EX-->>TS: Order
       end
     end
   end
 ```
 
-**읽을 때 볼 것**: `planned → unknown → sent` 순서가 핵심이다. `unknown`으로 바꾼 뒤에 전송하므로, 전송 직후 죽어도 재시작 때 "보냈을 수도 있는 주문"으로 남는다. 반대로 전송 전에 죽으면 `planned`라 안전하게 다시 보낼 수 있다. UNIQUE(idem_key)가 두 프로세스가 동시에 같은 주문을 넣는 것도 막는다.
+**읽을 때 볼 것**: `planned → unknown → sent` 순서가 핵심이다. 보내기 전 잔고 조회는 `unknown`으로 바꾸기 **전에** 한다 — 그 조회가 실패하면 아무것도 보내지 않은 것이 확실하므로 `planned`로 남겨 다시 보낼 수 있다(2026-10-01 전에는 이 실패가 "보냈는지 모름"으로 남았다). `unknown`으로 바꾼 뒤에 전송하므로, 전송 직후 죽어도 재시작 때 "보냈을 수도 있는 주문"으로 남는다. 반대로 전송 전에 죽으면 `planned`라 안전하게 다시 보낼 수 있다. UNIQUE(idem_key)가 두 프로세스가 동시에 같은 주문을 넣는 것도 막는다.
 
 #### SEQ-4 판단 실행 (08:40 매도, 09:05 매수)
 
@@ -283,6 +299,39 @@ sequenceDiagram
 
 **읽을 때 볼 것**: 관문 통과 기록을 확인하는 곳은 `gate_approve`와 SEQ-3의 관문 둘이다. 설정 파일만 바꿔서는 SEQ-3의 관문이 거부한다.
 
+#### SEQ-7 월간 보고
+
+근거: [[QBOT-UC-001#UC-A6]], [[QBOT-UC-001#UC-H2]] 7a·7b
+
+```mermaid
+sequenceDiagram
+  participant SCH
+  participant RPT
+  participant DS
+  participant DB
+  participant OPS
+  Note over SCH: 매월 첫 거래일 19:00
+  SCH->>RPT: monthly(year, month, mode)
+  RPT->>DB: valuation(그달 + 직전 1건) → 수익률, 고점 대비, 원금 대비, 입출금
+  RPT->>DB: fill(그달·누적) → 체결 수, 비용(수수료+세금), 그달 실현 손익
+  RPT->>DB: index_level(KOSPI) → 코스피 수익률
+  RPT->>DS: month_benchmarks(month_start, month_end)
+  DS->>DB: 그달에 적용된 판단(기준일 < 월말인 마지막 실제 판단)
+  DS->>DS: ideal_return(판단, upto=월말) → 모의 계산값
+  DS->>DS: universe_return(판단 기준일, 월말) → 전 종목 동일 비중
+  DS->>DS: factor_effects(월말, 12) → 지표 7개 12개월 효과
+  DS-->>RPT: Benchmarks
+  RPT->>RPT: 체결 오차 = 실제 - 모의 (계좌가 판단 기준일에 평가되지 않았으면 비움)
+  RPT->>RPT: 지수 부분 = ETF 수익률, 전략 부분 = (전체 - w × 지수) / (1 - w), w = 월초 지수 비중
+  RPT->>DB: monthly_report 저장
+  opt 실전 첫 달
+    RPT->>RPT: |체결 오차| ≤ 1%p → "나머지 투입 가능", 아니면 "투입 보류 권고"
+  end
+  SCH->>OPS: notify(summary, 보고)
+```
+
+**읽을 때 볼 것**: 계산할 수 없는 항목은 0이 아니라 비우고 이유를 적는다(첫 달, 지수 이력 부족 등). 지표 효과는 재점검(`review_rules`)과 같은 계산을 12개월로 돌린 것이고 설정을 바꾸지 않는다. 투입 해제는 보고가 아니라 운영자의 `gate_release`가 한다.
+
 ## 2. 대응표
 
 | 유스케이스 | 시퀀스 |
@@ -292,8 +341,8 @@ sequenceDiagram
 | UC-A3 판단 실행 | SEQ-4, SEQ-3 |
 | UC-A4 재시작 후 이어 하기 | SEQ-5 |
 | UC-A5 손실 한도 감시 | SEQ-1 |
-| UC-A6 월간 성과 보고 | 단순 집계. 그리지 않음 |
-| UC-A7 손절 감시 | SEQ-1 (표시), SEQ-4 (매도) |
+| UC-A6 월간 성과 보고 | SEQ-7 |
+| UC-A7 손절·지정 종목 매도 감시 | SEQ-1 (표시), SEQ-4 (매도) |
 | UC-H1 봇 정지와 재개 | SEQ-6의 도구 실행 경로와 같음. 그리지 않음 |
 | UC-H2 실전 전환 | SEQ-6 |
 | UC-H3 규칙 재점검 승인 | SEQ-6과 같은 경로. 그리지 않음 |
@@ -315,10 +364,11 @@ sequenceDiagram
 | [[QBOT-DOM-002#OrderExecutor]] | `send`가 `planned → unknown → sent` 세 번 상태를 바꾼다. "unknown으로 바꾼 뒤 전송"이 핵심이다 |
 | [[QBOT-DOM-002#TradingService]] | 매도와 매수 사이에 `balance()`를 다시 부른다. 매수 단계의 첫 일은 체결 기록이다. `mark_stop_losses`가 새로 생겼다 |
 | [[QBOT-DOM-003]] | `decision.budget_per_slot`은 참고값이다. `position.stop_loss_on`(손절 표시 날짜)이 새로 필요하다. `filing.numbers_rcept_no`(숫자를 가져온 공시)가 생겼다 |
+| [[QBOT-DOM-003]] (2026-10-01) | `trade_order.pre_qty`·`pre_cost`(보내기 전 잔고), `fill.realized_pnl`(매도 실현 손익), `position.exit_reason`(매도 예정 사유: stop_loss·managed), `gate_record.released_at`·`released_by_command_id`(첫 달 상한 해제) |
 
 ## 4. 미결사항
 
 - [x] SEQ-3의 체결 확인 제한 시간과 재시도 가격 폭 → v1은 남은 수량 시장가 재주문
 - [x] SEQ-4에서 매도 체결이 부분 체결로 끝났을 때 매수 예산에 반영할지 → 실제 현금 기준이므로 자동 반영
-- [ ] 모의 체결 재구성의 "보내기 전 잔고"가 프로세스 메모리에만 있다. 조회 시간 초과 뒤 다른 프로세스가 확인하면 체결을 못 본다(2026-09-29 실주문에서 겪음). DB에 남기는 것을 검토
-- [ ] 조회(읽기) 호출의 시간 초과 재시도. 지금은 재시도 없이 바로 실패한다(UC-S7 1b1과 다르다)
+- [x] 모의 체결 재구성의 "보내기 전 잔고"가 프로세스 메모리에만 있다 → `trade_order.pre_qty`·`pre_cost`에 저장(SEQ-3), 저녁 대조 전 재확인(SEQ-1)
+- [x] 조회(읽기) 호출의 시간 초과 재시도 → 이 항목이 틀렸다. `KisClient.get`은 처음부터 네 번 시도했다. 9/29에는 네 번 모두 실패했고, 부족한 것은 실패 뒤의 처리였다(위 항목)
