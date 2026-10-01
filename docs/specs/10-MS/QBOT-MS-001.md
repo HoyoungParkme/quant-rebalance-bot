@@ -31,6 +31,12 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 | OrderExecutor.reconcile_unknown | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-5]] |
 | TradingService.execute | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-4]] |
 | TradingService.mark_stop_losses | 쓰기 | [[QBOT-SEQ-001#SEQ-1]] |
+| TradingService.mark_status_exits | 쓰기 | [[QBOT-SEQ-001#SEQ-1]] |
+| TradingService.confirm_open_orders | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-1]] · [[QBOT-SEQ-001#SEQ-4]] |
+| ReportingService.daily_summary | 조회 | [[QBOT-SEQ-001#SEQ-1]] |
+| ReportingService.monthly | 쓰기 | [[QBOT-SEQ-001#SEQ-7]] |
+| DecisionService.month_benchmarks | 조회 | [[QBOT-SEQ-001#SEQ-7]] |
+| LiveGate.release | 쓰기 | [[QBOT-API-001#gate_release]] |
 | RiskService.record_valuation | 쓰기 | [[QBOT-SEQ-001#SEQ-1]] |
 | RiskService.gate_approve | 쓰기·외부 | [[QBOT-SEQ-001#SEQ-6]] |
 
@@ -232,10 +238,12 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 4. `if existing and existing.status in (unknown, sent) → 체결 확인부터 (10단계)`
 5. `verdict = gate.check(req, trading.equity_snapshot())`. `if not allowed → 행을 rejected로(있으면 그 행을 고쳐서) 남기고 반환`
 6. `INSERT status=planned` (UNIQUE 충돌이면 2단계로 돌아간다)
-7. `UPDATE status=unknown` 하고 **커밋한다**. 여기서 죽어도 흔적이 남아야 재시작 때 확인할 수 있다
-8. `no = broker.place_order(req)`. 이 호출은 재시도하지 않는다. **모의투자**는 주문별 체결 내역을 주지 않으므로 어댑터가 보내기 전 잔고를 기억해 뒀다가 잔고 차이로 체결을 재구성한다(매수가 = 매입원가 증가분 ÷ 수량, 매도가 = 그날 매도 평균가)
-9. `UPDATE broker_order_no=no, status=sent`
-10. `wait=False`면 여기서 끝낸다(체결 확인은 09:05에). 아니면 제한 시간 동안 `order_status(no)`를 폴링한다. 증권사는 누적 체결과 누적 평균가만 주므로 **늘어난 수량과 그 구간 가격만** `fill`로 넣는다(키는 `{증권사주문번호}:{누적수량}`). `if 전량 체결 → filled · elif 제한 시간 초과 → cancel_order로 **취소를 확인한 뒤에만** 재주문(확인 못 하면 살아 있는 주문 위에 또 내는 것이라 두 번 산다). 재시도는 남은 수량을 시장가로, 전송 전에 `unknown`으로 커밋하고 `attempt`를 올린다 · else → partial/cancelled`
+7. **`pre = broker.balance().holdings.get(code)`** — 보내기 전 그 종목의 수량·매입원가. 조회가 끝내 실패하면 `BrokerUnavailable`을 올리고 행은 `planned`로 둔다(아무것도 보내지 않았다). **2026-10-01 전에는 이 조회가 주문 어댑터 안에서 전송 직전에 돌아, 실패가 "보냈는지 모름"으로 남았다**
+8. `UPDATE pre_qty, pre_cost, status=unknown` 하고 **커밋한다**. 여기서 죽어도 흔적이 남아야 재시작 때 확인할 수 있다
+9. `no = broker.place_order(req)`. 이 호출은 재시도하지 않는다. **모의투자**는 주문별 체결 내역을 주지 않으므로 체결을 **주문 행의 `pre_qty`·`pre_cost`와 지금 잔고의 차이로** 재구성한다(매수가 = 매입원가 증가분 ÷ 수량, 매도가 = 그날 매도 평균가). 실행기가 `order_status(no, hint=OrderHint(code, side, qty, pre_qty, pre_cost))`로 넘기고, 어댑터는 주문을 기억하지 않는다. 보내기 전 잔고가 DB에 있으므로 재시작하거나 다른 시각의 확인(15:40, 20:10)에서도 재구성할 수 있다
+10. `UPDATE broker_order_no=no, status=sent`
+11. `wait=False`면 여기서 끝낸다(체결 확인은 09:05에). 아니면 제한 시간 동안 `order_status(no)`를 폴링한다. 증권사는 누적 체결과 누적 평균가만 주므로 **늘어난 수량과 그 구간 가격만** `fill`로 넣는다(키는 `{증권사주문번호}:{누적수량}`). `if 전량 체결 → filled · elif 제한 시간 초과 → cancel_order로 **취소를 확인한 뒤에만** 재주문(확인 못 하면 살아 있는 주문 위에 또 내는 것이라 두 번 산다). 재시도는 남은 수량을 시장가로 **한 번**(`max_retries=1`), 전송 전에 `unknown`으로 커밋하고 `retry_count`를 올린다 · else → partial/cancelled`. 체결 확인 조회가 끝내 실패하면(`BrokerUnavailable`) 주문을 `sent`로 열어 둔 채 반환한다 — 15:40 `cancel_open`과 20:10 `confirm_open_orders`가 다시 본다
+12. **매도 체결이면 `fill.realized_pnl = qty × (price - position.avg_cost) - fee - tax`**를 체결 행에 함께 넣는다(평단은 보유에 반영하기 전 값). 매수는 비운다
 
 **출력** 최종 상태의 Order
 
@@ -243,7 +251,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **호출하는 것** OrderGate.check, OrderBrokerPort.place_order·order_status·cancel_order, TradingCrud
 
-**테스트 관점** 7단계 뒤 예외를 강제로 내면 행이 `unknown`으로 남아야 한다. 같은 인자로 두 번 부르면 증권사 호출은 한 번이어야 한다. 취소가 확인되지 않으면 재주문하지 않아야 한다.
+**테스트 관점** 7단계(보내기 전 잔고) 조회가 실패하면 행이 `planned`로 남고 증권사 주문이 0번이어야 한다. 8단계 뒤 예외를 강제로 내면 행이 `unknown`으로 남아야 한다. 어댑터를 새로 만들어도(재시작) 주문 행의 `pre_qty`로 체결이 재구성돼야 한다. 평단 10,000원 10주를 12,000원에 팔면 `realized_pnl = 20,000 - 수수료 - 세금`이어야 한다. 같은 인자로 두 번 부르면 증권사 호출은 한 번이어야 한다. 취소가 확인되지 않으면 재주문하지 않아야 한다.
 
 근거: [[QBOT-SEQ-001#SEQ-3]] · [[QBOT-INFRA-001#C8]] · [[QBOT-INFRA-001]] 5.1
 
@@ -315,6 +323,102 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 근거: [[QBOT-SEQ-001#SEQ-1]] · [[QBOT-UC-001#UC-A7]] · [[QBOT-PRD-001#R6]]
 
+#### TradingService.mark_status_exits 관리종목 매도 표시
+
+**시그니처** `mark_status_exits(d: date, statuses: Mapping[str, set[str]]) -> list[dict]`
+
+**입력** `statuses`는 그날 종목별 지정 상태(`MarketDataService.statuses_on`). 저녁 수집 뒤에 부른다.
+
+**처리**
+1. `if state.orders_blocked → []`. 손절과 같은 이유다(기록이 틀렸을 수 있다)
+2. 보유 수량 > 0 인 종목 중 `statuses[code] ∩ {managed, liquidation}`이 있고 `position.stop_loss_on is None`인 것을 고른다. 지수 ETF는 뺀다
+3. `position.stop_loss_on = d`, `position.exit_reason = "managed"`. 결과에 `{code, reason, statuses}` 추가
+4. 커밋
+
+**출력** 새로 표시한 종목 목록. 스케줄이 손절 예정과 함께 "내일 매도 예정"으로 알린다. 다음 날 매도는 손절과 같은 경로다(`execute` 6단계·`sell_stop_losses`) — 이 표시는 사유만 다르고 "다음 거래일 장 시작 전 시장가 전량 매도"라는 동작이 같다. 되사기 막기도 같은 표시로 걸리지만, 관리종목은 판단 대상에서 이미 빠지므로 실제로 걸릴 일은 없다
+
+**테스트 관점** 관리종목으로 지정된 보유 종목이 목표 종목이어도 표시되고 다음 `sell` 단계에서 팔린다. 이미 손절로 표시된 종목은 다시 표시하지 않는다. 투자경고(warning)만으로는 표시하지 않는다(매수 후보에서만 빠진다).
+
+근거: [[QBOT-SEQ-001#SEQ-1]] · [[QBOT-UC-001#UC-A7]] · [[QBOT-PRD-001#R15]]
+
+#### TradingService.confirm_open_orders 열린 주문 다시 확인
+
+**시그니처** `confirm_open_orders(decision_id: int | None = None) -> list[str]`
+
+**처리**
+1. `sent`·`unknown` 상태의 주문(주어지면 그 판단의 것만)을 고른다. 증권사 주문 번호가 없는 `unknown`은 `reconcile_unknown`이 맡는다
+2. 주문마다 `executor._confirm(o, ...)`로 체결을 확인·기록한다. 조회가 실패한 주문은 건너뛰고 다음 주문으로 간다(예외를 올리지 않는다)
+3. 체결이 끝난 매도 종목 코드를 돌려준다
+
+**호출 시점** 09:05 매수 단계 첫 일(그날 판단의 08:40 매도), **20:10 저녁 점검의 대조 직전**(오늘 열린 주문 전부, 2026-10-01 추가)
+
+**테스트 관점** 체결 확인 중 조회가 실패해 `sent`로 남은 주문이, 저녁 점검에서 체결로 기록되고 대조가 일치해야 한다.
+
+근거: [[QBOT-SEQ-001#SEQ-1]] · [[QBOT-SEQ-001#SEQ-4]] · [[QBOT-UC-001#UC-S3]] 6b
+
+#### ReportingService.daily_summary 일일 요약
+
+**시그니처** `daily_summary(d: date) -> str`
+
+**처리**
+1. `v = 그날 valuation`. 없으면 "기록이 없다"
+2. `prev = d 이전 마지막 valuation`. 있으면 `change = v.total - prev.total - v.external_flow`, `pct = change / (prev.total + v.external_flow)`. 입출금은 손익이 아니다
+3. 줄: 평가액(현금·주식·지수), **전일 대비 change(pct)**, 고점 대비·원금 대비, 입출금(있으면), 보유 종목 수·최고·최저, 매도 예정(있으면 종목·사유)
+
+**테스트 관점** 어제 1,000만, 오늘 1,010만이면 "+100,000원 (+1.0%)". 오늘 100만 입금으로 1,110만이면 여전히 +100,000원. 첫날(직전 기록 없음)은 전일 대비 줄이 없다.
+
+근거: [[QBOT-SEQ-001#SEQ-1]] · [[QBOT-PRD-001#R11]]
+
+#### ReportingService.monthly 월간 보고
+
+**시그니처** `monthly(year: int, month: int, mode: str) -> MonthlyReport`
+
+**처리**
+1. 평가액: 그달 valuation과 직전 1건으로 수익률(입출금 제외), 그달 최저 고점 대비, 월말 원금 대비 누적 손익
+2. 비용·손익: 그달 체결 수, 그달 비용(수수료+세금), **누적 비용**, **그달 실현 손익**(`fill.realized_pnl` 합)
+3. 코스피: 그달 첫·마지막 평가일의 지수 종가
+4. `b = decision.month_benchmarks(month_start, month_end)` — 모의 계산값, 전 종목 동일 비중, 지표 12개월 효과
+5. **체결 오차** = 실제 수익률 - 모의 계산값. 적용된 판단의 기준일에 평가액 기록이 없으면(첫 달) 기간이 달라 비우고 이유를 적는다
+6. **전략·지수 부분**: `w = 월초 index_value / 월초 total`, `지수 부분 = ETF 그달 수익률`, `전략 부분 = (전체 - w × 지수) / (1 - w)`. 그달 안의 비중 조정은 무시하는 근사이고 보고에 그렇게 적는다. `w == 0`이면 지수 부분을 비운다
+7. 실전이고 `bot_state.first_month_cap`이 걸려 있으면: `|체결 오차| ≤ 0.01 → "나머지 투입 가능 (gate_release)"`, 아니면 "투입 보류 권고", 체결 오차가 비었으면 "판단 불가"
+8. `|체결 오차| > 0.01`이면 보고 첫 줄에 경고
+9. 저장(같은 달·모드면 갱신). 계산 못 한 항목은 `None`과 이유(notes)
+
+**테스트 관점** 지난달 기록만 있는 가짜 DB로 각 항목이 채워진다. 매도 2건의 실현 손익 합이 보고에 나온다. 체결 오차가 1.5%p면 경고가 붙고, 실전 첫 달이면 "투입 보류 권고"다. 지수 비중 0이면 지수 부분이 비어 있다.
+
+근거: [[QBOT-SEQ-001#SEQ-7]] · [[QBOT-UC-001#UC-A6]] · [[QBOT-PRD-001#R12]] · [[QBOT-PRD-001#R14]]
+
+#### DecisionService.month_benchmarks 그달의 비교 기준
+
+**시그니처** `month_benchmarks(month_start: str, month_end: str, mode: str) -> Benchmarks`
+
+**처리**
+1. `dec = 기준일 < month_end인 마지막 실제 판단`(그달 보유를 정한 판단). 없으면 모의 계산값·동일 비중을 비운다
+2. `ideal = ideal_return(dec, upto=month_end)` — 손절 규칙 포함(R8)
+3. `universe = 그 판단 기준일의 대상 종목(apply_universe 통과)`의 기준일 종가 → 월말 종가 수익률 단순 평균. 이것이 "전 종목 동일 비중"이다
+4. `effects = factor_effects(month_end, months=12)` — `review_rules`와 같은 계산(상위 10% - 하위 10%의 다음 달 수익률 차이)을 **설정을 바꾸지 않고 저장도 하지 않고** 지표별 평균·t값만 돌려준다. 지금 설정의 7개 지표만 담는다. `review_rules`는 이 함수를 불러 후보 전체로 계산하도록 고친다(같은 계산을 두 벌 두지 않는다)
+
+**출력** `Benchmarks(decision_id, ideal, equal_weight, effects, notes)`
+
+**테스트 관점** 12개월 효과가 `review_rules(months=12)`의 같은 지표 값과 같아야 한다.
+
+근거: [[QBOT-SEQ-001#SEQ-7]] · [[QBOT-UC-001#UC-A6]]
+
+#### LiveGate.release 첫 달 매수 상한 해제
+
+**시그니처** `release(command_id: int | None) -> GateRecord`
+
+**처리**
+1. `state.mode != live → Precondition("실전 모드가 아니다")`. `state.first_month_cap is None → Precondition("이미 풀렸다")`
+2. `rep = 실전 전환(live_since) 뒤에 끝난 첫 달의 monthly_report`. 없으면 Precondition("첫 달 보고가 아직 없다")
+3. `gap = rep의 체결 오차`. `None`이거나 `|gap| > 0.01`이면 GateFailed(값과 함께)
+4. `state.first_month_cap = None`, `gate_record.released_at = now, released_by_command_id = command_id`
+5. 알림 "첫 달 상한 해제. 다음 월말부터 전액 운용"
+
+**테스트 관점** 체결 오차 0.8%p면 풀리고 1.2%p면 거부된다. 모의 모드에서는 거부된다. 두 번 부르면 두 번째는 Precondition.
+
+근거: [[QBOT-API-001#gate_release]] · [[QBOT-UC-001#UC-H2]] 7b · [[QBOT-PRD-001#R8]]
+
 #### RiskService.record_valuation 일별 평가액
 
 **시그니처** `record_valuation(d: date) -> Valuation`
@@ -358,7 +462,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 - [x] `record_valuation`의 입출금 감지 → 사람이 계좌 대조에서 밝힌 금액만 센다(`reconciliation.external_flow`). 증권사 입출금 내역 조회에 기대지 않는다
 - [x] `OrderExecutor.send`의 재시도 가격 폭 → v1은 "남은 수량 시장가 재주문". 호가 2단계는 호가 조회가 필요해 v1 범위를 넘는다
 - [ ] `Scorer.score`의 시가총액에 쓸 주식 수. 지금은 **현재 주식 수**를 과거 월말에도 그대로 쓴다. 연구에서 순이익÷주당이익으로 연도별 주식 수를 88~90% 추정할 수 있었다 — 봇에 넣을지 결정 필요
-- [ ] 실전 첫 달 뒤 "체결 오차 1%p 이내면 나머지 투입"([[QBOT-PRD-001#R8]])을 실행할 함수가 없다. 첫 달 상한을 푸는 경로가 필요하다
+- [x] 실전 첫 달 뒤 "체결 오차 1%p 이내면 나머지 투입"([[QBOT-PRD-001#R8]])을 실행할 함수가 없다 → `LiveGate.release` (2026-10-01)
 - [x] 관문의 "월 수익 차이" 모의 계산값(`ideal_return`)에 손절 규칙 적용 → -15% 이하가 된 날의 다음 거래일 **종가**로 청산. 실제는 다음 날 08:40 동시호가(시가)에 팔리므로 그만큼의 차이가 체결 오차에 섞인다(리뷰 지적, 시가 조회를 붙이면 줄일 수 있다)
-- [ ] 모의 체결 재구성의 "보내기 전 잔고"를 DB에 남길지. 지금은 프로세스 메모리라 다른 프로세스가 확인할 수 없다(2026-09-29 실주문에서 겪음)
-- [ ] 조회 호출의 시간 초과 재시도([[QBOT-UC-001#UC-S7]] 1b1). 지금은 재시도 없이 바로 실패한다
+- [x] 모의 체결 재구성의 "보내기 전 잔고"를 DB에 남길지 → 남긴다(`trade_order.pre_qty`·`pre_cost`, `OrderExecutor.send` 7·8단계)
+- [x] 조회 호출의 시간 초과 재시도([[QBOT-UC-001#UC-S7]] 1b1) → 이 항목이 틀렸다. `KisClient.get`은 처음부터 네 번 시도했다. 부족한 것은 네 번 다 실패한 뒤의 처리였고, 위 항목과 `confirm_open_orders`의 저녁 호출로 메운다
