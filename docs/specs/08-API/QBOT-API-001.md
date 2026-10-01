@@ -127,6 +127,16 @@ upstream: [QBOT-UC-001, QBOT-DOM-001, QBOT-INFRA-001]
 {"name":"gate_approve","inputSchema":{"type":"object","properties":{"capital_krw":{"type":"integer","minimum":1000000},"first_month_ratio":{"type":"number","minimum":0.1,"maximum":1.0,"default":0.3},"confirm":{"type":"boolean"}},"required":["capital_krw","confirm"],"additionalProperties":false}}
 ```
 
+#### gate_release 실전 나머지 투입 해제
+
+유스케이스 [[QBOT-UC-001#UC-H2]] 7b · 서비스 `LiveGate.release`
+
+실전 첫 달 매수 상한(`bot_state.first_month_cap`)을 푼다. 실전 모드이고, 상한이 걸려 있고, 체결 오차(실제 수익 - 모의 계산값)를 잰 **가장 최근 실전 월간 보고**의 값이 1%p 이내일 때만 받는다. 월간 보고의 "나머지 투입 가능" 판정과 같은 달을 본다 — 첫 달만 보면 첫 달이 기준을 넘은 뒤로는 영영 풀 수 없다. 아니면 어느 조건이 왜 안 되는지 답하고 거부한다. 풀린 일시와 명령이 GateRecord에 남는다.
+
+```json
+{"name":"gate_release","inputSchema":{"type":"object","properties":{"confirm":{"type":"boolean"}},"required":["confirm"],"additionalProperties":false}}
+```
+
 ### 3.4 규칙
 
 #### review_run 규칙 재점검 실행
@@ -205,7 +215,7 @@ upstream: [QBOT-UC-001, QBOT-DOM-001, QBOT-INFRA-001]
 
 유스케이스 [[QBOT-UC-001#UC-H5]] · 서비스 `OpsService.install_check`
 
-환경 변수, 증권사 조회·주문 접속, 전자공시, 전략 설정, 데이터베이스를 점검하고 빠진 것을 답한다. `register_autostart`를 주면 systemd 사용자 유닛을 만든다.
+환경 변수, 증권사 조회·주문 접속, 전자공시, 전략 설정, 데이터베이스를 점검하고 빠진 것을 답한다. `register_autostart`를 주면 systemd 사용자 유닛을 만든다. **WSL2에서는 systemd 사용자 세션이 없어 만들지 않고**, 윈도우에서 실행할 `tools/windows/register-autostart.ps1` 명령을 대신 답한다([[QBOT-INFRA-001]] 8.2).
 
 ```json
 {"name":"install","inputSchema":{"type":"object","properties":{"register_autostart":{"type":"boolean","default":false}},"additionalProperties":false}}
@@ -215,11 +225,11 @@ upstream: [QBOT-UC-001, QBOT-DOM-001, QBOT-INFRA-001]
 
 | 상황 | 순서 |
 |---|---|
-| 처음 설치 | `install` → `backfill --from 2019-01-01 --sources calendar,status,index,bars` → `backfill --from 2023-01-01 --sources filings` → `replay --asof … --compare-to research_file` (몇 개) → `install --register-autostart` → `run` |
+| 처음 설치 | `install` → `backfill --from 2019-01-01 --sources calendar,status,index,bars` → `backfill --from 2023-01-01 --sources filings` → `replay --asof … --compare-to research_file` (몇 개) → `install --register-autostart`(WSL2면 답한 PowerShell 명령을 윈도우에서 실행) → `run` |
 | 정지하고 싶다 | `halt --confirm` → 상황 확인 → `resume --confirm` |
 | 손실 한도 알림을 받았다 | `positions` → 판단 → `resume --reset-peak --confirm` 또는 그대로 둠 |
 | 계좌 불일치 알림을 받았다 | `reconcile` → 원인 확인 → `reconcile_accept --reason "…" [--external-flow 금액] --confirm` |
-| 실전으로 넘어간다 | `gate_check` → 통과 확인 → 실전 키를 환경 변수에 넣고 → `gate_approve --capital-krw 3000000 --confirm` → `QBOT_MODE=live`로 재시작 |
+| 실전으로 넘어간다 | `gate_check` → 통과 확인 → 실전 키를 환경 변수에 넣고 → `gate_approve --capital-krw 3000000 --confirm` → `QBOT_MODE=live`로 재시작 → 첫 달 월간 보고가 "나머지 투입 가능"이면 `gate_release --confirm` |
 | 연초 | `review_run` → 결과를 읽고 `review_approve --review-id N --confirm` 또는 무시 |
 | 코드를 바꿔 다시 띄운다 | `tools/qstop.sh` → 저장소 받기 → `run` (월말 판단일과 다음 거래일은 피한다) |
 
@@ -227,4 +237,4 @@ upstream: [QBOT-UC-001, QBOT-DOM-001, QBOT-INFRA-001]
 
 - [x] 메신저에서 `confirm`을 받는 방식 → 6자리 확인 코드(5분). 메시지에 직접 쓴 `confirm`은 버린다
 - [ ] `halt` 상태에서 스케줄의 월말 판단을 계산까지는 할지 아예 건너뛸지. 지금은 계산하고 저장하되 주문은 관문이 막는다
-- [ ] 실전 첫 달 뒤 나머지 자금을 투입하는 도구가 없다([[QBOT-PRD-001#R8]] 마지막 줄). 첫 달 상한을 푸는 경로가 필요하다
+- [x] 실전 첫 달 뒤 나머지 자금을 투입하는 도구가 없다([[QBOT-PRD-001#R8]] 마지막 줄) → `gate_release` (2026-10-01)
