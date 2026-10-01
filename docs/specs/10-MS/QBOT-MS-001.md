@@ -240,7 +240,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 6. `INSERT status=planned` (UNIQUE 충돌이면 2단계로 돌아간다)
 7. **`pre = broker.balance().holdings.get(code)`** — 보내기 전 그 종목의 수량·매입원가. 조회가 끝내 실패하면 `BrokerUnavailable`을 올리고 행은 `planned`로 둔다(아무것도 보내지 않았다). **2026-10-01 전에는 이 조회가 주문 어댑터 안에서 전송 직전에 돌아, 실패가 "보냈는지 모름"으로 남았다**
 8. `UPDATE pre_qty, pre_cost, status=unknown` 하고 **커밋한다**. 여기서 죽어도 흔적이 남아야 재시작 때 확인할 수 있다
-9. `no = broker.place_order(req)`. 이 호출은 재시도하지 않는다. **모의투자**는 주문별 체결 내역을 주지 않으므로 체결을 **주문 행의 `pre_qty`·`pre_cost`와 지금 잔고의 차이로** 재구성한다(매수가 = 매입원가 증가분 ÷ 수량, 매도가 = 그날 매도 평균가). 실행기가 `order_status(no, hint=OrderHint(code, side, qty, pre_qty, pre_cost))`로 넘기고, 어댑터는 주문을 기억하지 않는다. 보내기 전 잔고가 DB에 있으므로 재시작하거나 다른 시각의 확인(15:40, 20:10)에서도 재구성할 수 있다
+9. `no = broker.place_order(req)`. 이 호출은 재시도하지 않는다. **모의투자**는 주문별 체결 내역을 주지 않으므로 체결을 **주문 행의 `pre_qty`·`pre_cost`와 지금 잔고의 차이로** 재구성한다(매수가 = 매입원가 증가분 ÷ 수량, 매도가 = 그날 매도 평균가). 실행기가 `order_status(no, hint=OrderHint(code, side, qty, pre_qty, pre_cost))`로 넘기고, 어댑터는 주문을 기억하지 않는다. **기준은 보낸 그날만 쓴다** — 며칠 지난 미확인 주문을 옛 기준으로 재면 그 뒤 매매로 바뀐 잔고를 이 주문의 체결로 센다(리뷰 지적). 그날이 지나면 대조가 맡는다 보내기 전 잔고가 DB에 있으므로 재시작하거나 다른 시각의 확인(15:40, 20:10)에서도 재구성할 수 있다
 10. `UPDATE broker_order_no=no, status=sent`
 11. `wait=False`면 여기서 끝낸다(체결 확인은 09:05에). 아니면 제한 시간 동안 `order_status(no)`를 폴링한다. 증권사는 누적 체결과 누적 평균가만 주므로 **늘어난 수량과 그 구간 가격만** `fill`로 넣는다(키는 `{증권사주문번호}:{누적수량}`). `if 전량 체결 → filled · elif 제한 시간 초과 → cancel_order로 **취소를 확인한 뒤에만** 재주문(확인 못 하면 살아 있는 주문 위에 또 내는 것이라 두 번 산다). 재시도는 남은 수량을 시장가로 **한 번**(`max_retries=1`), 전송 전에 `unknown`으로 커밋하고 `retry_count`를 올린다 · else → partial/cancelled`. 체결 확인 조회가 끝내 실패하면(`BrokerUnavailable`) 주문을 `sent`로 열어 둔 채 반환한다 — 15:40 `cancel_open`과 20:10 `confirm_open_orders`가 다시 본다
 12. **매도 체결이면 `fill.realized_pnl = qty × (price - position.avg_cost) - fee - tax`**를 체결 행에 함께 넣는다(평단은 보유에 반영하기 전 값). 매수는 비운다
@@ -395,7 +395,7 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 **처리**
 1. `dec = 기준일 < month_end인 마지막 실제 판단`(그달 보유를 정한 판단). 없으면 모의 계산값·동일 비중을 비운다
 2. `ideal = ideal_return(dec, upto=month_end)` — 손절 규칙 포함(R8)
-3. `universe = 그 판단 기준일의 대상 종목(apply_universe 통과)`의 기준일 종가 → 월말 종가 수익률 단순 평균. 이것이 "전 종목 동일 비중"이다
+3. `universe = 그 판단 기준일에 가격·거래대금·시가총액·거래 필터(`scoring.tradable`)를 통과한 종목`의 기준일 종가 → 월말 종가 수익률 단순 평균. 이것이 "전 종목 동일 비중"이다. 지표가 비어 점수를 못 매기는 종목도 살 수 있는 종목이라 넣는다
 4. `effects = factor_effects(month_end, months=12)` — `review_rules`와 같은 계산(상위 10% - 하위 10%의 다음 달 수익률 차이)을 **설정을 바꾸지 않고 저장도 하지 않고** 지표별 평균·t값만 돌려준다. 지금 설정의 7개 지표만 담는다. `review_rules`는 이 함수를 불러 후보 전체로 계산하도록 고친다(같은 계산을 두 벌 두지 않는다)
 
 **출력** `Benchmarks(decision_id, ideal, equal_weight, effects, notes)`
@@ -410,12 +410,12 @@ upstream: [QBOT-DOM-002, QBOT-SEQ-001, QBOT-API-001]
 
 **처리**
 1. `state.mode != live → Precondition("실전 모드가 아니다")`. `state.first_month_cap is None → Precondition("이미 풀렸다")`
-2. `rep = 실전 전환(live_since) 뒤에 끝난 첫 달의 monthly_report`. 없으면 Precondition("첫 달 보고가 아직 없다")
+2. `rep = 체결 오차를 잰 가장 최근 실전 monthly_report`. 없으면 Precondition("첫 달 보고가 아직 없다"). 월간 보고의 판정과 같은 달이어야 한다(리뷰 지적: 첫 달을 보면 한 번 넘은 뒤 영영 못 푼다)
 3. `gap = rep의 체결 오차`. `None`이거나 `|gap| > 0.01`이면 GateFailed(값과 함께)
 4. `state.first_month_cap = None`, `gate_record.released_at = now, released_by_command_id = command_id`
 5. 알림 "첫 달 상한 해제. 다음 월말부터 전액 운용"
 
-**테스트 관점** 체결 오차 0.8%p면 풀리고 1.2%p면 거부된다. 모의 모드에서는 거부된다. 두 번 부르면 두 번째는 Precondition.
+**테스트 관점** 체결 오차 0.8%p면 풀리고 1.2%p면 거부된다. 첫 달 1.5%p, 둘째 달 0.3%p면 둘째 달로 판정해 풀린다. 모의 모드에서는 거부된다. 두 번 부르면 두 번째는 Precondition.
 
 근거: [[QBOT-API-001#gate_release]] · [[QBOT-UC-001#UC-H2]] 7b · [[QBOT-PRD-001#R8]]
 
